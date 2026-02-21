@@ -1,4 +1,4 @@
-FROM bitwalker/alpine-elixir-phoenix:1.14
+FROM bitwalker/alpine-elixir-phoenix:1.15
 
 # Install additional build dependencies needed for native compilation
 # Also install Tesseract OCR, Portuguese language pack, and poppler-utils for PDF to image conversion

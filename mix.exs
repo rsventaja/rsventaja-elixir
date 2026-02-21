@@ -5,7 +5,7 @@ defmodule Ersventaja.MixProject do
     [
       app: :ersventaja,
       version: "0.1.0",
-      elixir: "~> 1.14",
+      elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       compilers: Mix.compilers(),
       start_permanent: Mix.env() == :prod,

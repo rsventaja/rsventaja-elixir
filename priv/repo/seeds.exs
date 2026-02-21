@@ -10,5 +10,8 @@
 # We recommend using the bang functions (`insert!`, `update!`
 # and so on) as they will fail if something goes wrong.
 
-# Create a default user
-Ersventaja.UserManager.create_user(%{username: "user", password: "123"})
+# Create default user only if it doesn't exist (idempotent seeds)
+alias Ersventaja.UserManager.Models.User
+unless Ersventaja.Repo.get_by(User, username: "user") do
+  Ersventaja.UserManager.create_user(%{username: "user", password: "123"})
+end

@@ -16,6 +16,7 @@ defmodule Ersventaja.UserManager.Models.User do
     user
     |> cast(hashed_attrs, [:username, :password])
     |> validate_required([:username, :password])
+    |> unique_constraint(:username)
   end
 
   defp hash_password(%{username: username, password: password}) do

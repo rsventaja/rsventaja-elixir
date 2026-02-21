@@ -11,7 +11,7 @@ defmodule Ersventaja.UserManager do
   import Ecto.Query, only: [from: 2]
 
   def authenticate_user(username, plain_text_password) do
-    query = from(u in User, where: u.username == ^username)
+    query = from(u in User, where: u.username == ^username, limit: 1)
 
     case Repo.one(query) do
       nil ->

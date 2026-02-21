@@ -1,4 +1,4 @@
-Pdefmodule ErsventajaWeb.ControlPanelLive do
+defmodule ErsventajaWeb.ControlPanelLive do
   use ErsventajaWeb, :live_view
   import ErsventajaWeb.Components.Navbar
   import ErsventajaWeb.Components.Hero

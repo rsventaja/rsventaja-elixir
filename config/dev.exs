@@ -2,10 +2,10 @@ import Config
 
 # Configure your database
 config :ersventaja, Ersventaja.Repo,
-  username: System.get_env("DB_USER", "ersventaja"),
-  password: System.get_env("DB_PASS", "ersventaja"),
+  username: System.get_env("DB_USER", "postgres"),
+  password: System.get_env("DB_PASS", "postgres"),
   hostname: System.get_env("DB_HOST", "localhost"),
-  database: System.get_env("DB_NAME", "ersventaja_dev"),
+  database: System.get_env("DB_NAME", "ersventaja"),
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
