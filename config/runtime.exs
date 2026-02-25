@@ -23,6 +23,16 @@ end
 config :ersventaja, :crypto,
   key: System.get_env("CRYPTO_KEY", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
 
+# WhatsApp Business (Meta) - used by webhook and bot
+# WHATSAPP_BASE_URL = URL pública do app (ex: https://rsventaja.com) para links de download
+config :ersventaja, :whatsapp,
+  app_id: System.get_env("META_APP_ID"),
+  app_secret: System.get_env("META_APP_SECRET"),
+  verify_token: System.get_env("WHATSAPP_VERIFY_TOKEN", "rsventaja_webhook_verify"),
+  phone_number_id: System.get_env("WHATSAPP_PHONE_NUMBER_ID"),
+  access_token: System.get_env("WHATSAPP_ACCESS_TOKEN"),
+  base_url: System.get_env("WHATSAPP_BASE_URL")
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

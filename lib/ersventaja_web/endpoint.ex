@@ -39,6 +39,7 @@ defmodule ErsventajaWeb.Endpoint do
 
   plug(Plug.RequestId)
   plug(Plug.Telemetry, event_prefix: [:phoenix, :endpoint])
+  plug(ErsventajaWeb.Plugs.WhatsappRawBody)
 
   plug(Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],

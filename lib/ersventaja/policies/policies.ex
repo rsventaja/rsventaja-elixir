@@ -258,6 +258,66 @@ defmodule Ersventaja.Policies do
     end
   end
 
+  @download_token_validity_seconds 900
+
+  def get_policies_by_cpf_cnpj(cpf_or_cnpj) when is_binary(cpf_or_cnpj) do
+    digits = normalize_cpf_cnpj(cpf_or_cnpj)
+    if digits == "" or byte_size(digits) < 11, do: [], else: do_get_policies_by_cpf_cnpj(digits)
+  end
+
+  def get_policies_by_cpf_cnpj(_), do: []
+
+  defp do_get_policies_by_cpf_cnpj(digits) do
+    # Compare normalized: DB may store "123.456.789-00", we search by digits only
+    query =
+      from(p in Policy,
+        where:
+          not is_nil(p.customer_cpf_or_cnpj) and p.customer_cpf_or_cnpj != "" and
+            fragment("regexp_replace(?, '[^0-9]', '', 'g')", p.customer_cpf_or_cnpj) == ^digits,
+        order_by: [desc: p.end_date]
+      )
+
+    query
+    |> Repo.all()
+    |> Repo.preload([:insurer])
+    |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
+    |> Enum.map(&policy_to_response/1)
+  end
+
+  defp normalize_cpf_cnpj(str), do: String.replace(str, ~r/[^0-9]/, "")
+
+  def generate_download_token(policy_id) when is_integer(policy_id) do
+    expiry = System.system_time(:second) + @download_token_validity_seconds
+    payload = "#{policy_id}:#{expiry}"
+    secret = Application.get_env(:ersventaja, :crypto)[:key]
+    sig = :crypto.mac(:hmac, :sha256, secret, payload) |> Base.url_encode64(padding: false)
+    Base.url_encode64("#{payload}:#{sig}", padding: false)
+  end
+
+  def verify_download_token(token) when is_binary(token) do
+    secret = Application.get_env(:ersventaja, :crypto)[:key]
+
+    try do
+      decoded = Base.url_decode64!(token, padding: false)
+      [id_str, expiry_str, sig] = String.split(decoded, ":", parts: 3)
+      expiry = String.to_integer(expiry_str)
+
+      if expiry < System.system_time(:second),
+        do: nil,
+        else: verify_sig_and_return_id(id_str, expiry_str, sig, secret)
+    rescue
+      _ -> nil
+    end
+  end
+
+  def verify_download_token(_), do: nil
+
+  defp verify_sig_and_return_id(id_str, expiry_str, sig, secret) do
+    payload = "#{id_str}:#{expiry_str}"
+    expected = :crypto.mac(:hmac, :sha256, secret, payload) |> Base.url_encode64(padding: false)
+    if Plug.Crypto.secure_compare(sig, expected), do: String.to_integer(id_str), else: nil
+  end
+
   defp policies_from_query(query) do
     query
     |> Repo.all()

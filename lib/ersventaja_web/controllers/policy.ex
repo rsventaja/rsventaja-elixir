@@ -148,4 +148,38 @@ defmodule ErsventajaWeb.PolicyController do
     |> put_status(:bad_request)
     |> json(%{error: "Missing encoded_file parameter"})
   end
+
+  def download_by_token(conn, %{"token" => token}) do
+    case Policies.verify_download_token(token) do
+      nil ->
+        conn
+        |> put_status(403)
+        |> json(%{error: "Link inválido ou expirado"})
+
+      policy_id ->
+        policy = Policies.get_policy(policy_id)
+
+        if is_nil(policy) do
+          conn |> put_status(404) |> json(%{error: "Apólice não encontrada"})
+        else
+          send_policy_pdf(conn, policy[:file_name])
+        end
+    end
+  end
+
+  def download_by_token(conn, _),
+    do: conn |> put_status(400) |> json(%{error: "Token obrigatório"})
+
+  defp send_policy_pdf(conn, file_name) do
+    case Policies.download_policy_file(file_name) do
+      {:ok, body} ->
+        conn
+        |> put_resp_content_type("application/pdf")
+        |> put_resp_header("content-disposition", "attachment; filename=\"apolice.pdf\"")
+        |> send_resp(200, body)
+
+      {:error, _} ->
+        conn |> put_status(404) |> json(%{error: "Arquivo não encontrado"})
+    end
+  end
 end

@@ -77,6 +77,13 @@ defmodule ErsventajaWeb.Router do
     post("/login", AuthenticationController, :login)
     get("/openapi", OpenApiSpex.Plug.RenderSpec, [])
 
+    # WhatsApp webhook (no auth; Meta calls this)
+    get("/whatsapp/webhook", ErsventajaWeb.WhatsappWebhookController, :verify)
+    post("/whatsapp/webhook", ErsventajaWeb.WhatsappWebhookController, :webhook)
+
+    # Public download with signed token (for WhatsApp bot link)
+    get("/policies/download", ErsventajaWeb.PolicyController, :download_by_token)
+
     scope "/" do
       pipe_through(:auth)
       post("/insurers", InsurerController, :create)
