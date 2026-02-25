@@ -42,6 +42,8 @@ defmodule Ersventaja.WhatsappBot do
   defp process_change(%{"value" => value, "field" => "messages"}) do
     messages = value["messages"] || []
     phone_number_id = value["metadata"]["phone_number_id"]
+    require Logger
+    Logger.info("[WhatsApp] Processing #{length(messages)} message(s)")
     Enum.each(messages, fn msg -> handle_message(phone_number_id, msg) end)
   end
 
@@ -53,7 +55,15 @@ defmodule Ersventaja.WhatsappBot do
          "text" => %{"body" => body}
        }) do
     reply = build_reply(String.trim(String.downcase(body)), from, phone_number_id)
-    MetaApi.send_text(phone_number_id, from, reply)
+
+    case MetaApi.send_text(phone_number_id, from, reply) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("[WhatsApp] Reply failed: #{inspect(reason)}")
+    end
   end
 
   defp handle_message(phone_number_id, %{"from" => from}) do
