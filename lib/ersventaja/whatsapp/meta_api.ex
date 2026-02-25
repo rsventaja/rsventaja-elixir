@@ -28,8 +28,9 @@ defmodule Ersventaja.Whatsapp.MetaApi do
 
       case :hackney.post(url, headers, Jason.encode!(payload), [:with_body]) do
         {:ok, status, _headers, resp_body} when status in 200..299 ->
-          Logger.info("[WhatsApp] Message sent OK to #{to}")
-          {:ok, Jason.decode!(resp_body)}
+          decoded = Jason.decode!(resp_body)
+          Logger.info("[WhatsApp] Message sent OK to #{to}, response: #{inspect(decoded)}")
+          {:ok, decoded}
 
         {:ok, status, _headers, resp_body} ->
           Logger.warning("[WhatsApp] Send failed HTTP #{status}: #{inspect(resp_body)}")
