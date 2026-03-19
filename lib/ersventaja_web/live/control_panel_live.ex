@@ -908,8 +908,8 @@ defmodule ErsventajaWeb.ControlPanelLive do
         "customer_name" -> Enum.sort_by(policies, &String.downcase(&1.customer_name || ""))
         "insurer" -> Enum.sort_by(policies, &String.downcase(to_string(&1.insurer || "")))
         "detail" -> Enum.sort_by(policies, &String.downcase(to_string(&1.detail || "")))
-        "start_date" -> Enum.sort_by(policies, & &1.start_date)
-        "end_date" -> Enum.sort_by(policies, & &1.end_date)
+        "start_date" -> Enum.sort_by(policies, &date_sort_key(&1.start_date))
+        "end_date" -> Enum.sort_by(policies, &date_sort_key(&1.end_date))
         "calculated" -> Enum.sort_by(policies, &if(&1.calculated, do: 1, else: 0))
         "name" -> Enum.sort_by(policies, &String.downcase(&1.name || ""))
         _ -> policies
@@ -917,6 +917,10 @@ defmodule ErsventajaWeb.ControlPanelLive do
 
     if sort_dir == "desc", do: Enum.reverse(sorted), else: sorted
   end
+
+  defp date_sort_key(%Date{} = d), do: {d.year, d.month, d.day}
+  defp date_sort_key(s) when is_binary(s), do: s |> Date.from_iso8601!() |> date_sort_key()
+  defp date_sort_key(_), do: {0, 0, 0}
 
   defp sort_icon(sort_by, sort_dir, col) do
     cond do
