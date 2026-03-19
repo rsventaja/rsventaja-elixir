@@ -28,6 +28,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
           |> assign(query_current_result: [])
           |> assign(query: "")
           |> assign(query_result: [])
+          |> assign(search_active_only: true)
           |> assign(
             insert_form: %{
               name: "",
@@ -52,6 +53,10 @@ defmodule ErsventajaWeb.ControlPanelLive do
           |> assign(selected_policy: nil)
           |> assign(editing_policy: false)
           |> assign(edit_form: %{})
+          |> assign(sort_by: "end_date", sort_dir: "asc")
+          |> assign(client_query: "")
+          |> assign(client_results: nil)
+          |> assign(selected_client: nil)
           |> allow_upload(:file,
             accept: ~w(.pdf),
             max_entries: 1,
@@ -79,6 +84,19 @@ defmodule ErsventajaWeb.ControlPanelLive do
         socket
       end
 
+    # Set default sort for each tab
+    default_sort =
+      case tab do
+        "due" -> %{sort_by: "end_date", sort_dir: "asc"}
+        "current" -> %{sort_by: "end_date", sort_dir: "asc"}
+        "all" -> %{sort_by: "customer_name", sort_dir: "asc"}
+        "insurers" -> %{sort_by: "name", sort_dir: "asc"}
+        "clients" -> %{sort_by: "end_date", sort_dir: "asc"}
+        _ -> %{sort_by: "end_date", sort_dir: "asc"}
+      end
+
+    socket = assign(socket, default_sort)
+
     {:noreply, socket}
   end
 
@@ -87,6 +105,51 @@ defmodule ErsventajaWeb.ControlPanelLive do
     # Close policy details when switching tabs
     socket = assign(socket, selected_policy: nil)
     {:noreply, push_patch(socket, to: "/controlpanel?tab=#{tab}")}
+  end
+
+  @impl true
+  def handle_event("sort", %{"by" => by}, socket) do
+    new_dir =
+      if socket.assigns.sort_by == by do
+        if socket.assigns.sort_dir == "asc", do: "desc", else: "asc"
+      else
+        "asc"
+      end
+
+    {:noreply, assign(socket, sort_by: by, sort_dir: new_dir)}
+  end
+
+  @impl true
+  def handle_event("sort_by", %{"by" => by}, socket) do
+    {:noreply, assign(socket, sort_by: by)}
+  end
+
+  @impl true
+  def handle_event("search_client", %{"name" => name}, socket) do
+    if String.length(String.trim(name)) < 2 do
+      {:noreply, socket |> put_flash(:warning, "Digite pelo menos 2 caracteres para buscar.")}
+    else
+      policies = Policies.get_policies("false", name)
+      client_results = group_clients_by_cpf(policies)
+      {:noreply, assign(socket, client_results: client_results, client_query: name)}
+    end
+  end
+
+  @impl true
+  def handle_event("update_client_query", %{"name" => val}, socket) do
+    {:noreply, assign(socket, client_query: val)}
+  end
+
+  @impl true
+  def handle_event("view_client", %{"index" => index_str}, socket) do
+    idx = String.to_integer(index_str)
+    client = Enum.at(socket.assigns.client_results, idx)
+    {:noreply, assign(socket, selected_client: client)}
+  end
+
+  @impl true
+  def handle_event("close_client", _params, socket) do
+    {:noreply, assign(socket, selected_client: nil)}
   end
 
   @impl true
@@ -119,9 +182,13 @@ defmodule ErsventajaWeb.ControlPanelLive do
   end
 
   @impl true
-  def handle_event("query_all", %{"query" => query}, socket) do
+  def handle_event("query_all", %{"query" => query} = params, socket) do
+    active_only = Map.get(params, "active_only") == "true"
+    socket = assign(socket, search_active_only: active_only)
+
     if String.length(query) > 0 do
-      result = Policies.get_policies("false", query)
+      filter = if active_only, do: "true", else: "false"
+      result = Policies.get_policies(filter, query)
       {:noreply, assign(socket, query_result: result, query: "")}
     else
       {:noreply, socket |> put_flash(:warning, "Favor preencher o nome para realizar a busca.")}
@@ -808,6 +875,63 @@ defmodule ErsventajaWeb.ControlPanelLive do
   defp format_ocr_error(reason) when is_binary(reason), do: reason
   defp format_ocr_error(reason), do: "Erro: #{inspect(reason)}"
 
+  defp group_clients_by_cpf(policies) do
+    {with_cpf, without_cpf} =
+      Enum.split_with(policies, fn p ->
+        p.customer_cpf_or_cnpj && p.customer_cpf_or_cnpj != ""
+      end)
+
+    cpf_groups =
+      with_cpf
+      |> Enum.group_by(fn p -> String.replace(p.customer_cpf_or_cnpj || "", ~r/[^0-9]/, "") end)
+      |> Enum.map(fn {_cpf, pols} -> aggregate_client(pols) end)
+
+    no_cpf_groups = Enum.map(without_cpf, fn p -> aggregate_client([p]) end)
+    cpf_groups ++ no_cpf_groups
+  end
+
+  defp aggregate_client(policies) do
+    uniq = fn list -> list |> Enum.reject(&(is_nil(&1) or &1 == "")) |> Enum.uniq() end
+
+    %{
+      cpf_cnpj: policies |> Enum.map(& &1.customer_cpf_or_cnpj) |> uniq.() |> List.first(),
+      name: policies |> Enum.map(& &1.customer_name) |> uniq.() |> List.first() || "—",
+      phones: policies |> Enum.map(& &1.customer_phone) |> uniq.(),
+      emails: policies |> Enum.map(& &1.customer_email) |> uniq.(),
+      policies: policies
+    }
+  end
+
+  defp sort_policies(policies, sort_by, sort_dir) do
+    sorted =
+      case sort_by do
+        "customer_name" -> Enum.sort_by(policies, &String.downcase(&1.customer_name || ""))
+        "insurer" -> Enum.sort_by(policies, &String.downcase(to_string(&1.insurer || "")))
+        "detail" -> Enum.sort_by(policies, &String.downcase(to_string(&1.detail || "")))
+        "start_date" -> Enum.sort_by(policies, & &1.start_date)
+        "end_date" -> Enum.sort_by(policies, & &1.end_date)
+        "calculated" -> Enum.sort_by(policies, &if(&1.calculated, do: 1, else: 0))
+        "name" -> Enum.sort_by(policies, &String.downcase(&1.name || ""))
+        _ -> policies
+      end
+
+    if sort_dir == "desc", do: Enum.reverse(sorted), else: sorted
+  end
+
+  defp sort_icon(sort_by, sort_dir, col) do
+    cond do
+      sort_by == col && sort_dir == "asc" -> "fas fa-sort-up"
+      sort_by == col && sort_dir == "desc" -> "fas fa-sort-down"
+      true -> "fas fa-sort"
+    end
+  end
+
+  defp sort_th_style(_sort_by, _col), do: ""
+
+  defp sort_btn_class(sort_by, col) do
+    if sort_by == col, do: "sort-btn active-sort", else: "sort-btn"
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -890,28 +1014,35 @@ defmodule ErsventajaWeb.ControlPanelLive do
         width: 100% !important;
         min-width: 0 !important;
         height: 44px !important;
-        padding: 12px 40px 12px 12px !important;
-        overflow: visible !important;
-        text-overflow: clip !important;
-        white-space: normal !important;
-        word-wrap: break-word !important;
-        background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 8" width="30"><path fill="%234A7AC2" d="M0,0l6,8l6-8"/></svg>') center right no-repeat !important;
-        background-size: 20px !important;
+        padding: 0 40px 0 14px !important;
+        background-color: white !important;
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><path fill="%234A7AC2" d="M8 11L2 5h12z"/></svg>') !important;
+        background-repeat: no-repeat !important;
+        background-size: 16px !important;
         background-position: right 12px center !important;
         cursor: pointer !important;
+        font-weight: 500 !important;
+        color: #374151 !important;
       }
       select.form-input:hover {
-        border-color: #cbd5e1 !important;
+        border-color: #4A7AC2 !important;
       }
       select.form-input:focus {
         border-color: #4A7AC2 !important;
-        box-shadow: 0 0 0 3px rgba(74, 122, 194, 0.1) !important;
+        box-shadow: 0 0 0 3px rgba(74, 122, 194, 0.12) !important;
       }
       select.form-input option {
-        white-space: normal !important;
-        padding: 12px !important;
-        border-radius: 4px !important;
         background: white !important;
+        color: #374151 !important;
+        padding: 10px 14px !important;
+        font-size: 14px !important;
+        font-weight: 400 !important;
+      }
+      select.form-input option:checked,
+      select.form-input option:hover {
+        background: linear-gradient(#dbeafe, #dbeafe) !important;
+        color: #1d4ed8 !important;
+        font-weight: 600 !important;
       }
 
       input[type="date"].form-input {
@@ -996,6 +1127,57 @@ defmodule ErsventajaWeb.ControlPanelLive do
         content: "" !important;
       }
 
+      /* Tab navigation groups */
+      .tab-divider { width: 1px; min-width: 1px; height: 28px; background: #e2e8f0; flex-shrink: 0; align-self: center; margin: 0 4px; }
+      .tab-settings-btn { margin-left: auto; flex-shrink: 0; background: none !important; border: none !important; box-shadow: none !important; cursor: pointer; color: #94a3b8; font-size: 18px; padding: 8px 10px !important; border-radius: 6px; transition: color 0.2s, background 0.2s; display: flex; align-items: center; }
+      .tab-settings-btn:hover { color: #4A7AC2; background-color: rgba(74,122,194,0.08) !important; }
+      .tab-settings-btn.active { color: #4A7AC2; background-color: rgba(74,122,194,0.12) !important; }
+      .tab-group-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #cbd5e1; padding: 0 4px; white-space: nowrap; align-self: center; flex-shrink: 0; display: none; }
+      @media (min-width: 900px) { .tab-group-label { display: block; } }
+
+      /* Sort headers */
+      .sort-th { cursor: pointer; user-select: none; white-space: nowrap; }
+      .sort-btn { background: none !important; border: none !important; box-shadow: none !important; cursor: pointer; font-weight: 600; font-size: 14px; color: #504f4f; display: inline-flex; align-items: center; gap: 0.4em; padding: 0 !important; margin: 0 !important; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; outline: none !important; }
+      .sort-btn:hover, .sort-btn:focus, .sort-btn:active { background: none !important; box-shadow: none !important; color: #4A7AC2; outline: none !important; }
+      .sort-btn .sort-icon { font-size: 10px; color: #cbd5e1; transition: color 0.15s; }
+      .sort-btn:hover .sort-icon, .sort-btn:focus .sort-icon { color: #4A7AC2; }
+      .sort-btn.active-sort .sort-icon { color: #4A7AC2; }
+      .mobile-sort-bar { display: none; align-items: center; gap: 0.5em; margin-bottom: 1em; flex-wrap: nowrap; }
+      .sort-dir-btn { background: linear-gradient(90deg, #3D5FA3, #5B9BD5); color: white; border: none; border-radius: 6px; height: 38px; padding: 0 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 13px; font-weight: 600; gap: 0.3em; white-space: nowrap; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+
+      /* ===== CLIENT SEARCH TAB ===== */
+      .client-profile { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); border-radius: 12px; padding: 1.5em; margin-bottom: 1.5em; }
+      .client-profile-header { display: flex; align-items: center; gap: 1em; margin-bottom: 1.25em; flex-wrap: wrap; }
+      .client-avatar { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, #3D5FA3, #7DCDEB); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .client-avatar i { color: white; font-size: 24px; }
+      .client-name { font-size: 22px; font-weight: 600; color: #1e293b; margin: 0; line-height: 1.2; }
+      .client-cpf  { font-size: 13px; color: #64748b; margin: 0.15em 0 0 0; }
+      .client-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1em; }
+      .client-info-card { background: white; border-radius: 8px; padding: 1em 1.25em; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+      .client-info-label { font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5em; display: flex; align-items: center; gap: 0.4em; }
+      .client-info-value { font-size: 15px; color: #1e293b; font-weight: 500; display: flex; flex-direction: column; gap: 0.3em; }
+      .client-info-value a { color: #4A7AC2; text-decoration: none; }
+      .client-info-value a:hover { text-decoration: underline; }
+      .client-policies-title { font-size: 18px; font-weight: 600; color: #504f4f; margin: 1.5em 0 0.75em; display: flex; align-items: center; gap: 0.5em; }
+      .policy-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1em; }
+      .policy-card-item { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 1.25em; cursor: pointer; transition: all 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+      .policy-card-item:hover { border-color: #4A7AC2; box-shadow: 0 4px 12px rgba(74,122,194,0.15); transform: translateY(-1px); }
+      .policy-card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75em; }
+      .policy-card-insurer { font-size: 13px; font-weight: 600; color: #4A7AC2; }
+      .policy-card-detail { font-size: 13px; color: #64748b; margin-top: 0.25em; }
+      .policy-card-dates { font-size: 13px; color: #64748b; display: flex; flex-direction: column; gap: 0.2em; margin-top: 0.5em; }
+      .policy-card-dates span { display: flex; align-items: center; gap: 0.4em; }
+      .days-badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-block; }
+      .days-badge.expired  { background: #fee2e2; color: #991b1b; }
+      .days-badge.soon     { background: #fef3c7; color: #92400e; }
+      .days-badge.ok       { background: #d1fae5; color: #065f46; }
+
+      @media (max-width: 640px) {
+        .policy-cards-grid { grid-template-columns: 1fr; }
+        .client-info-grid  { grid-template-columns: 1fr; }
+        .client-name { font-size: 18px; }
+      }
+
       /* ===== MOBILE RESPONSIVE ===== */
       @media (max-width: 768px) {
         /* Main content */
@@ -1043,6 +1225,11 @@ defmodule ErsventajaWeb.ControlPanelLive do
         /* Policy details header */
         .details-header { flex-direction: column !important; align-items: stretch !important; }
         .details-header button { width: 100%; justify-content: center; }
+      }
+
+      /* Show mobile sort bar, hide sort icons in card headers (headers are hidden) */
+      @media (max-width: 640px) {
+        .mobile-sort-bar { display: flex; }
       }
 
       /* Responsive tables → card layout on small screens */
@@ -1109,47 +1296,54 @@ defmodule ErsventajaWeb.ControlPanelLive do
       <div class="main-content main-content-pad" style="max-width: 1400px; margin: 0 auto; padding: 3em 2em;">
         <!-- Tabs -->
         <div class="bg-white rounded-lg shadow-md mb-6 p-4" style="overflow: hidden;">
-          <nav class="tab-nav-scroll flex gap-2">
+          <nav class="tab-nav-scroll flex gap-1" style="align-items: center;">
+
+            <%# ── Grupo 1: Urgência ── %>
             <button
-              phx-click="switch_tab"
-              phx-value-tab="due"
+              phx-click="switch_tab" phx-value-tab="due"
               class={"tab-button #{if @active_tab == "due", do: "active", else: ""}"}
             >
-              <i class="fas fa-clock"></i>
-              Apólices a vencer
+              <i class="fas fa-bell"></i> A Vencer
             </button>
+
+            <span class="tab-divider"></span>
+
+            <%# ── Grupo 2: Consulta ── %>
             <button
-              phx-click="switch_tab"
-              phx-value-tab="current"
-              class={"tab-button #{if @active_tab == "current", do: "active", else: ""}"}
+              phx-click="switch_tab" phx-value-tab="clients"
+              class={"tab-button #{if @active_tab == "clients", do: "active", else: ""}"}
             >
-              <i class="fas fa-search"></i>
-              Buscar apólices vigentes
+              <i class="fas fa-user-circle"></i> Clientes
             </button>
+
+            <span class="tab-divider"></span>
+
             <button
-              phx-click="switch_tab"
-              phx-value-tab="all"
+              phx-click="switch_tab" phx-value-tab="all"
               class={"tab-button #{if @active_tab == "all", do: "active", else: ""}"}
             >
-              <i class="fas fa-list"></i>
-              Buscar apólices
+              <i class="fas fa-list"></i> Apólices
             </button>
+
+            <span class="tab-divider"></span>
+
+            <%# ── Grupo 3: Gestão ── %>
             <button
-              phx-click="switch_tab"
-              phx-value-tab="register"
+              phx-click="switch_tab" phx-value-tab="register"
               class={"tab-button #{if @active_tab == "register", do: "active", else: ""}"}
             >
-              <i class="fas fa-plus-circle"></i>
-              Cadastrar apólice
+              <i class="fas fa-plus-circle"></i> Nova Apólice
             </button>
+
+            <%# ── Configurações (direita) ── %>
             <button
-              phx-click="switch_tab"
-              phx-value-tab="insurers"
-              class={"tab-button #{if @active_tab == "insurers", do: "active", else: ""}"}
+              phx-click="switch_tab" phx-value-tab="insurers"
+              class={"tab-settings-btn #{if @active_tab == "insurers", do: "active", else: ""}"}
+              title="Configurar seguradoras"
             >
-              <i class="fas fa-building"></i>
-              Configurar seguradoras
+              <i class="fas fa-cog"></i>
             </button>
+
           </nav>
         </div>
 
@@ -1468,22 +1662,67 @@ defmodule ErsventajaWeb.ControlPanelLive do
         <%= if @active_tab == "due" do %>
           <div class="table-container">
             <h2 style="font-size: 28px; font-weight: 500; margin-bottom: 1.5em; color: #504f4f; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">Apólices com vencimento nos próximos 30 dias</h2>
+            <!-- Mobile sort bar -->
+            <div class="mobile-sort-bar">
+              <select class="form-input" style="flex: 1; height: 38px; font-size: 13px;" phx-change="sort_by" name="by">
+                <option value="end_date" selected={@sort_by == "end_date"}>Vencimento</option>
+                <option value="customer_name" selected={@sort_by == "customer_name"}>Nome</option>
+                <option value="insurer" selected={@sort_by == "insurer"}>Seguradora</option>
+                <option value="calculated" selected={@sort_by == "calculated"}>Calculado</option>
+                <option value="start_date" selected={@sort_by == "start_date"}>Início</option>
+              </select>
+              <button class="sort-dir-btn" phx-click="sort" phx-value-by={@sort_by}>
+                <%= if @sort_dir == "asc" do %>
+                  <i class="fas fa-arrow-up"></i> Cresc.
+                <% else %>
+                  <i class="fas fa-arrow-down"></i> Decresc.
+                <% end %>
+              </button>
+            </div>
             <div class="overflow-x-auto">
               <table class="responsive-table">
                 <thead>
                   <tr>
-                    <th>Calculado?</th>
-                    <th>Dias Restantes</th>
-                    <th>Nome</th>
-                    <th>Seguradora</th>
-                    <th>Informações Adicionais</th>
-                    <th>Início</th>
-                    <th>Vencimento</th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "calculated")} phx-click="sort" phx-value-by="calculated">
+                        Calculado? <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "calculated")}"}></i>
+                      </button>
+                    </th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "end_date")} phx-click="sort" phx-value-by="end_date">
+                        Dias Restantes <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "end_date")}"}></i>
+                      </button>
+                    </th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "customer_name")} phx-click="sort" phx-value-by="customer_name">
+                        Nome <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "customer_name")}"}></i>
+                      </button>
+                    </th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "insurer")} phx-click="sort" phx-value-by="insurer">
+                        Seguradora <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "insurer")}"}></i>
+                      </button>
+                    </th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "detail")} phx-click="sort" phx-value-by="detail">
+                        Informações Adicionais <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "detail")}"}></i>
+                      </button>
+                    </th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "start_date")} phx-click="sort" phx-value-by="start_date">
+                        Início <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "start_date")}"}></i>
+                      </button>
+                    </th>
+                    <th class="sort-th">
+                      <button class={sort_btn_class(@sort_by, "end_date")} phx-click="sort" phx-value-by="end_date">
+                        Vencimento <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "end_date")}"}></i>
+                      </button>
+                    </th>
                     <th>Ação</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <%= for policy <- @policies do %>
+                  <%= for policy <- sort_policies(@policies, @sort_by, @sort_dir) do %>
                     <tr id={"policy-due-#{policy.id}"} phx-click="view_policy" phx-value-id={policy.id} style="cursor: pointer;" class="hover-row">
                       <td data-label="Calculado?" phx-click="update_renewal" phx-value-id={policy.id} style="cursor: pointer;">
                         <input
@@ -1551,21 +1790,61 @@ defmodule ErsventajaWeb.ControlPanelLive do
             </form>
 
             <%= if length(@query_current_result) > 0 do %>
+              <!-- Mobile sort bar -->
+              <div class="mobile-sort-bar">
+                <select class="form-input" style="flex: 1; height: 38px; font-size: 13px;" phx-change="sort_by" name="by">
+                  <option value="end_date" selected={@sort_by == "end_date"}>Vencimento</option>
+                  <option value="customer_name" selected={@sort_by == "customer_name"}>Nome</option>
+                  <option value="insurer" selected={@sort_by == "insurer"}>Seguradora</option>
+                  <option value="start_date" selected={@sort_by == "start_date"}>Início</option>
+                </select>
+                <button class="sort-dir-btn" phx-click="sort" phx-value-by={@sort_by}>
+                  <%= if @sort_dir == "asc" do %>
+                    <i class="fas fa-arrow-up"></i> Cresc.
+                  <% else %>
+                    <i class="fas fa-arrow-down"></i> Decresc.
+                  <% end %>
+                </button>
+              </div>
               <div class="overflow-x-auto">
                 <table class="responsive-table">
                   <thead>
                     <tr>
-                      <th>Dias Restantes</th>
-                      <th>Nome</th>
-                      <th>Seguradora</th>
-                      <th>Informações Adicionais</th>
-                      <th>Início</th>
-                      <th>Vencimento</th>
+                      <th class="sort-th">
+                        <button class={sort_btn_class(@sort_by, "end_date")} phx-click="sort" phx-value-by="end_date">
+                          Dias Restantes <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "end_date")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th">
+                        <button class={sort_btn_class(@sort_by, "customer_name")} phx-click="sort" phx-value-by="customer_name">
+                          Nome <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "customer_name")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th">
+                        <button class={sort_btn_class(@sort_by, "insurer")} phx-click="sort" phx-value-by="insurer">
+                          Seguradora <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "insurer")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th">
+                        <button class={sort_btn_class(@sort_by, "detail")} phx-click="sort" phx-value-by="detail">
+                          Informações Adicionais <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "detail")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th">
+                        <button class={sort_btn_class(@sort_by, "start_date")} phx-click="sort" phx-value-by="start_date">
+                          Início <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "start_date")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th">
+                        <button class={sort_btn_class(@sort_by, "end_date")} phx-click="sort" phx-value-by="end_date">
+                          Vencimento <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "end_date")}"}></i>
+                        </button>
+                      </th>
                       <th>Ação</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <%= for policy <- @query_current_result do %>
+                    <%= for policy <- sort_policies(@query_current_result, @sort_by, @sort_dir) do %>
                       <tr id={"policy-current-#{policy.id}"} phx-click="view_policy" phx-value-id={policy.id} style="cursor: pointer;" class="hover-row">
                         <td data-label="Dias">
                           <span style="padding: 6px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; background-color: #d1fae5; color: #065f46;">
@@ -1617,24 +1896,65 @@ defmodule ErsventajaWeb.ControlPanelLive do
                     <span>Buscar</span>
                   </button>
                 </div>
+                <label style="display: inline-flex; align-items: center; gap: 0.5em; margin-top: 0.75em; cursor: pointer; font-size: 14px; font-weight: 400; color: #504f4f; user-select: none;">
+                  <input type="checkbox" name="active_only" value="true" checked={@search_active_only} style="width: 16px; height: 16px; accent-color: #4A7AC2; cursor: pointer;" />
+                  Apenas apólices vigentes
+                </label>
               </div>
             </form>
 
             <%= if length(@query_result) > 0 do %>
+              <!-- Mobile sort bar -->
+              <div class="mobile-sort-bar">
+                <select class="form-input" style="flex: 1; height: 38px; font-size: 13px;" phx-change="sort_by" name="by">
+                  <option value="customer_name" selected={@sort_by == "customer_name"}>Nome</option>
+                  <option value="insurer" selected={@sort_by == "insurer"}>Seguradora</option>
+                  <option value="end_date" selected={@sort_by == "end_date"}>Vencimento</option>
+                  <option value="start_date" selected={@sort_by == "start_date"}>Início</option>
+                  <option value="detail" selected={@sort_by == "detail"}>Detalhe</option>
+                </select>
+                <button class="sort-dir-btn" phx-click="sort" phx-value-by={@sort_by}>
+                  <%= if @sort_dir == "asc" do %>
+                    <i class="fas fa-arrow-up"></i> Cresc.
+                  <% else %>
+                    <i class="fas fa-arrow-down"></i> Decresc.
+                  <% end %>
+                </button>
+              </div>
               <div class="overflow-x-auto">
                 <table class="responsive-table">
                   <thead>
                     <tr>
-                      <th>Nome</th>
-                      <th>Seguradora</th>
-                      <th>Informações Adicionais</th>
-                      <th>Início</th>
-                      <th>Vencimento</th>
+                      <th class="sort-th" style={sort_th_style(@sort_by, "customer_name")}>
+                        <button class="sort-btn" phx-click="sort" phx-value-by="customer_name">
+                          Nome <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "customer_name")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th" style={sort_th_style(@sort_by, "insurer")}>
+                        <button class="sort-btn" phx-click="sort" phx-value-by="insurer">
+                          Seguradora <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "insurer")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th" style={sort_th_style(@sort_by, "detail")}>
+                        <button class="sort-btn" phx-click="sort" phx-value-by="detail">
+                          Informações Adicionais <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "detail")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th" style={sort_th_style(@sort_by, "start_date")}>
+                        <button class="sort-btn" phx-click="sort" phx-value-by="start_date">
+                          Início <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "start_date")}"}></i>
+                        </button>
+                      </th>
+                      <th class="sort-th" style={sort_th_style(@sort_by, "end_date")}>
+                        <button class="sort-btn" phx-click="sort" phx-value-by="end_date">
+                          Vencimento <i class={"sort-icon #{sort_icon(@sort_by, @sort_dir, "end_date")}"}></i>
+                        </button>
+                      </th>
                       <th>Ações</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <%= for policy <- @query_result do %>
+                    <%= for policy <- sort_policies(@query_result, @sort_by, @sort_dir) do %>
                       <tr id={"policy-all-#{policy.id}"} phx-click="view_policy" phx-value-id={policy.id} style="cursor: pointer;" class="hover-row">
                         <td data-label="Nome" style="font-weight: 500;"><%= policy.customer_name %></td>
                         <td data-label="Seguradora"><%= policy.insurer %></td>
@@ -1666,7 +1986,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
         <%= if @active_tab == "register" do %>
           <div class="table-container">
 
-            <h2 style="font-size: 28px; font-weight: 500; margin-bottom: 1.5em; color: #504f4f; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">Cadastrar apólice</h2>
+            <h2 style="font-size: 28px; font-weight: 500; margin-bottom: 1.5em; color: #504f4f; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">Nova apólice</h2>
 
             <%= if @adding_policy do %>
               <div class="flex justify-center items-center py-8">
@@ -2039,6 +2359,184 @@ defmodule ErsventajaWeb.ControlPanelLive do
                 <p style="text-align: center; color: #666; padding: 2em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">Nenhuma seguradora cadastrada ainda.</p>
               <% end %>
             </div>
+          </div>
+        <% end %>
+
+        <%= if @active_tab == "clients" do %>
+          <div class="table-container">
+            <%= if @selected_client do %>
+              <%# ── Client detail view ── %>
+              <div class="details-header" style="margin-bottom: 1.5em; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1em;">
+                <button phx-click="close_client" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 10px 20px; font-size: 15px;">
+                  <i class="fas fa-arrow-left"></i> Voltar
+                </button>
+              </div>
+
+              <div class="client-profile">
+                <div class="client-profile-header">
+                  <div class="client-avatar"><i class="fas fa-user"></i></div>
+                  <div>
+                    <p class="client-name"><%= @selected_client.name %></p>
+                    <%= if @selected_client.cpf_cnpj do %>
+                      <p class="client-cpf"><i class="fas fa-id-card" style="margin-right: 0.3em;"></i><%= @selected_client.cpf_cnpj %></p>
+                    <% end %>
+                  </div>
+                  <div style="margin-left: auto; background: linear-gradient(90deg,#3D5FA3,#7DCDEB); color: white; border-radius: 20px; padding: 6px 16px; font-size: 13px; font-weight: 600; white-space: nowrap; flex-shrink: 0;">
+                    <%= length(@selected_client.policies) %> apólice<%= if length(@selected_client.policies) != 1, do: "s", else: "" %>
+                  </div>
+                </div>
+
+                <div class="client-info-grid">
+                  <%= if @selected_client.phones != [] do %>
+                    <div class="client-info-card">
+                      <div class="client-info-label"><i class="fas fa-phone"></i> Telefone<%= if length(@selected_client.phones) > 1, do: "s", else: "" %></div>
+                      <div class="client-info-value">
+                        <%= for phone <- @selected_client.phones do %>
+                          <a href={"https://wa.me/+55#{String.replace(phone, ~r/\D/, "")}"} target="_blank">
+                            <i class="fab fa-whatsapp" style="color: #25D366; margin-right: 0.3em;"></i><%= phone %>
+                          </a>
+                        <% end %>
+                      </div>
+                    </div>
+                  <% end %>
+                  <%= if @selected_client.emails != [] do %>
+                    <div class="client-info-card">
+                      <div class="client-info-label"><i class="fas fa-envelope"></i> E-mail<%= if length(@selected_client.emails) > 1, do: "s", else: "" %></div>
+                      <div class="client-info-value">
+                        <%= for email <- @selected_client.emails do %>
+                          <a href={"mailto:#{email}"}><i class="fas fa-envelope" style="margin-right: 0.3em; color: #4A7AC2;"></i><%= email %></a>
+                        <% end %>
+                      </div>
+                    </div>
+                  <% end %>
+                </div>
+              </div>
+
+              <div class="client-policies-title">
+                <i class="fas fa-file-contract" style="color: #4A7AC2;"></i> Apólices
+              </div>
+              <div class="overflow-x-auto">
+                <table class="responsive-table">
+                  <thead>
+                    <tr>
+                      <th>Seguradora</th>
+                      <th>Detalhe</th>
+                      <th>Início</th>
+                      <th>Vencimento</th>
+                      <th>Dias</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <%= for policy <- @selected_client.policies do %>
+                      <% days = calculate_days(policy.end_date) %>
+                      <tr class="hover-row" phx-click="view_policy" phx-value-id={policy.id} style="cursor: pointer;">
+                        <td data-label="Seguradora" style="font-weight: 500;"><%= policy.insurer || "—" %></td>
+                        <td data-label="Detalhe"><%= policy.detail || "—" %></td>
+                        <td data-label="Início"><%= format_date(policy.start_date) %></td>
+                        <td data-label="Vencimento"><%= format_date(policy.end_date) %></td>
+                        <td data-label="Dias" class="td-action">
+                          <span class={"days-badge #{if days <= 0, do: "expired", else: if days <= 30, do: "soon", else: "ok"}"}>
+                            <%= if days <= 0, do: "Vencida", else: "#{days}d" %>
+                          </span>
+                        </td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+
+            <% else %>
+              <%# ── Search form + results table ── %>
+              <h2 style="font-size: 28px; font-weight: 500; margin-bottom: 0.25em; color: #504f4f; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">Busca de Clientes</h2>
+              <p style="font-size: 14px; color: #94a3b8; margin-bottom: 1.5em;">Busque pelo nome para ver todas as apólices e dados do cliente.</p>
+
+              <form phx-submit="search_client" phx-change="update_client_query" style="margin-bottom: 1.5em;">
+                <div style="max-width: 480px;">
+                  <label style="display: block; font-size: 15px; font-weight: 500; margin-bottom: 0.5em; color: #504f4f;">Nome do cliente</label>
+                  <div class="search-row" style="display: flex; gap: 0.75em;">
+                    <input
+                      type="text"
+                      name="name"
+                      value={@client_query}
+                      class="form-input"
+                      placeholder="Digite parte do nome..."
+                      autocomplete="off"
+                    />
+                    <button type="submit" class="btn-primary">
+                      <i class="fas fa-search"></i> <span>Buscar</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+
+              <%= if is_nil(@client_results) do %>
+                <div style="text-align: center; padding: 3em 1em; color: #94a3b8;">
+                  <i class="fas fa-users" style="font-size: 48px; margin-bottom: 0.75em; display: block;"></i>
+                  <p style="font-size: 16px; margin: 0;">Digite um nome para buscar o cliente.</p>
+                </div>
+              <% else %>
+                <%= if @client_results == [] do %>
+                  <div style="text-align: center; padding: 3em 1em; color: #94a3b8;">
+                    <i class="fas fa-user-slash" style="font-size: 48px; margin-bottom: 0.75em; display: block;"></i>
+                    <p style="font-size: 16px; margin: 0;">Nenhum cliente encontrado.</p>
+                  </div>
+                <% else %>
+                  <p style="font-size: 13px; color: #94a3b8; margin-bottom: 0.75em;">
+                    <%= length(@client_results) %> cliente<%= if length(@client_results) != 1, do: "s encontrados", else: " encontrado" %>
+                  </p>
+                  <div class="overflow-x-auto">
+                    <table class="responsive-table">
+                      <thead>
+                        <tr>
+                          <th>Nome</th>
+                          <th>CPF / CNPJ</th>
+                          <th>Telefone(s)</th>
+                          <th>E-mail(s)</th>
+                          <th>Apólices</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <%= for {client, idx} <- Enum.with_index(@client_results) do %>
+                          <tr class="hover-row" phx-click="view_client" phx-value-index={idx} style="cursor: pointer;">
+                            <td data-label="Nome" style="font-weight: 600; color: #1e293b;"><%= client.name %></td>
+                            <td data-label="CPF/CNPJ" style="font-size: 13px; color: #64748b;"><%= client.cpf_cnpj || "—" %></td>
+                            <td data-label="Telefone">
+                              <%= for {phone, i} <- Enum.with_index(client.phones) do %>
+                                <%= if i < 2 do %>
+                                  <a href={"https://wa.me/+55#{String.replace(phone, ~r/\D/, "")}"} target="_blank" style="display: block; color: #4A7AC2; text-decoration: none; font-size: 13px; white-space: nowrap;" phx-click="noop">
+                                    <i class="fab fa-whatsapp" style="color: #25D366; margin-right: 0.2em;"></i><%= phone %>
+                                  </a>
+                                <% end %>
+                              <% end %>
+                              <%= if length(client.phones) > 2 do %>
+                                <span style="font-size: 12px; color: #94a3b8;">+<%= length(client.phones) - 2 %> mais</span>
+                              <% end %>
+                            </td>
+                            <td data-label="E-mail">
+                              <%= for {email, i} <- Enum.with_index(client.emails) do %>
+                                <%= if i < 2 do %>
+                                  <a href={"mailto:#{email}"} style="display: block; color: #4A7AC2; text-decoration: none; font-size: 13px;" phx-click="noop">
+                                    <%= email %>
+                                  </a>
+                                <% end %>
+                              <% end %>
+                              <%= if length(client.emails) > 2 do %>
+                                <span style="font-size: 12px; color: #94a3b8;">+<%= length(client.emails) - 2 %> mais</span>
+                              <% end %>
+                            </td>
+                            <td data-label="Apólices" class="td-action">
+                              <span style="background: linear-gradient(90deg,#3D5FA3,#7DCDEB); color: white; border-radius: 20px; padding: 4px 12px; font-size: 13px; font-weight: 600; white-space: nowrap;">
+                                <%= length(client.policies) %>
+                              </span>
+                            </td>
+                          </tr>
+                        <% end %>
+                      </tbody>
+                    </table>
+                  </div>
+                <% end %>
+              <% end %>
+            <% end %>
           </div>
         <% end %>
 
