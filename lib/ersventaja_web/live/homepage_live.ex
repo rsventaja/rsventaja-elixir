@@ -38,7 +38,7 @@ defmodule ErsventajaWeb.HomepageLive do
         <section class="section">
           <h2 class="section-title">Quem somos</h2>
           <p class="about-text">
-            No mercado há 20 anos, trabalhamos com atenção especial às necessidades individuais do cliente. Temos orgulho em
+            No mercado desde 2000, trabalhamos com atenção especial às necessidades individuais do cliente. Temos orgulho em
             construir relações de confiança, possuindo clientes satisfeitos pelo nosso atendimento personalizado e bem
             amparados pelas coberturas que oferecemos.
           </p>
