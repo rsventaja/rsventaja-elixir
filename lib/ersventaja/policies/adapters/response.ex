@@ -33,6 +33,12 @@ defmodule Ersventaja.Policies.Adapters.ResponseAdapter do
          customer_cpf_or_cnpj: Map.get(policy, :customer_cpf_or_cnpj),
          customer_phone: Map.get(policy, :customer_phone),
          customer_email: Map.get(policy, :customer_email),
-         license_plate: Map.get(policy, :license_plate)
+         license_plate: Map.get(policy, :license_plate),
+         insurance_type:
+           case Map.get(policy, :insurance_type) do
+             %{name: name} -> name
+             _ -> nil
+           end,
+         insurance_type_id: Map.get(policy, :insurance_type_id)
        }
 end

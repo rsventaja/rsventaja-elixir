@@ -35,6 +35,9 @@ loan-*.tar
 .env
 .deploy.env
 
+# Python probe (scripts/segfy_chain_probe.py)
+scripts/.venv/
+
 # ElixirLS dir
 /.elixir_ls/
 .DS_Store

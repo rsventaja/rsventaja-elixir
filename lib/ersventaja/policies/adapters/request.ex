@@ -24,6 +24,7 @@ defmodule Ersventaja.Policies.Adapters.RequestAdapter do
         customer_cpf_or_cnpj: Map.get(attrs, "customer_cpf_or_cnpj"),
         customer_phone: Map.get(attrs, "customer_phone"),
         customer_email: Map.get(attrs, "customer_email"),
-        license_plate: Map.get(attrs, "license_plate")
+        license_plate: Map.get(attrs, "license_plate"),
+        insurance_type_id: Map.get(attrs, "insurance_type_id")
       }
 end

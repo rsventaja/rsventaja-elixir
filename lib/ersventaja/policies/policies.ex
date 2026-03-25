@@ -2,6 +2,7 @@ defmodule Ersventaja.Policies do
   alias Ersventaja.Repo
   alias Ersventaja.Policies.Adapters.RequestAdapter
   alias Ersventaja.Policies.Adapters.ResponseAdapter
+  alias Ersventaja.Policies.Models.InsuranceType
   alias Ersventaja.Policies.Models.Insurer
   alias Ersventaja.Policies.Models.Policy
 
@@ -34,6 +35,21 @@ defmodule Ersventaja.Policies do
     Repo.delete!(insurer)
   end
 
+  # Insurance Types CRUD
+
+  def add_insurance_type(name) do
+    Repo.insert!(%InsuranceType{name: name})
+  end
+
+  def get_insurance_types() do
+    Repo.all(from(it in InsuranceType, order_by: it.name))
+  end
+
+  def delete_insurance_type(id) do
+    insurance_type = Repo.get!(InsuranceType, id)
+    Repo.delete!(insurance_type)
+  end
+
   def add_policy(attrs) do
     with request <- RequestAdapter.create_policy_request(attrs) do
       # Handle both base64 encoded and binary file content
@@ -55,7 +71,8 @@ defmodule Ersventaja.Policies do
           customer_cpf_or_cnpj: request.customer_cpf_or_cnpj,
           customer_phone: request.customer_phone,
           customer_email: request.customer_email,
-          license_plate: request.license_plate
+          license_plate: request.license_plate,
+          insurance_type_id: request.insurance_type_id
         })
 
       file_name = get_file_name(policy.id)
@@ -135,7 +152,7 @@ defmodule Ersventaja.Policies do
 
       policy ->
         policy
-        |> Repo.preload([:insurer])
+        |> Repo.preload([:insurer, :insurance_type])
         |> then(fn p -> Map.merge(p, %{file_name: get_file_name(p.id)}) end)
         |> policy_to_response()
     end
@@ -147,6 +164,8 @@ defmodule Ersventaja.Policies do
       customer_name: policy.customer_name,
       insurer: if(policy.insurer, do: policy.insurer.name, else: nil),
       insurer_id: policy.insurer_id,
+      insurance_type: if(policy.insurance_type, do: policy.insurance_type.name, else: nil),
+      insurance_type_id: policy.insurance_type_id,
       detail: policy.detail,
       start_date: policy.start_date,
       end_date: policy.end_date,
@@ -168,7 +187,7 @@ defmodule Ersventaja.Policies do
       )
 
     Repo.all(query)
-    |> Repo.preload([:insurer])
+    |> Repo.preload([:insurer, :insurance_type])
     |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
   end
 
@@ -212,13 +231,15 @@ defmodule Ersventaja.Policies do
               Map.get(attrs, "customer_cpf_or_cnpj", policy.customer_cpf_or_cnpj),
             customer_phone: Map.get(attrs, "customer_phone", policy.customer_phone),
             customer_email: Map.get(attrs, "customer_email", policy.customer_email),
-            license_plate: Map.get(attrs, "license_plate", policy.license_plate)
+            license_plate: Map.get(attrs, "license_plate", policy.license_plate),
+            insurance_type_id:
+              parse_integer(Map.get(attrs, "insurance_type_id")) || policy.insurance_type_id
           })
 
         case Repo.update(changeset) do
           {:ok, updated_policy} ->
             updated_policy
-            |> Repo.preload([:insurer])
+            |> Repo.preload([:insurer, :insurance_type])
             |> then(fn p -> Map.merge(p, %{file_name: get_file_name(p.id)}) end)
             |> policy_to_response()
             |> then(&{:ok, &1})
@@ -279,7 +300,7 @@ defmodule Ersventaja.Policies do
 
     query
     |> Repo.all()
-    |> Repo.preload([:insurer])
+    |> Repo.preload([:insurer, :insurance_type])
     |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
     |> Enum.map(&policy_to_response/1)
   end
@@ -321,7 +342,7 @@ defmodule Ersventaja.Policies do
   defp policies_from_query(query) do
     query
     |> Repo.all()
-    |> Repo.preload([:insurer])
+    |> Repo.preload([:insurer, :insurance_type])
     |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
     |> ResponseAdapter.get_policy_response()
   end

@@ -41,7 +41,7 @@ defmodule Ersventaja.MixProject do
       {:phoenix_html, "~> 3.3"},
       {:phoenix_live_reload, "~> 1.4", only: :dev},
       {:phoenix_live_view, "~> 0.20"},
-      {:floki, ">= 0.30.0", only: :test},
+      {:floki, ">= 0.30.0"},
       {:phoenix_live_dashboard, "~> 0.8"},
       {:esbuild, "~> 0.7", runtime: Mix.env() == :dev},
       {:swoosh, "~> 1.12"},
@@ -57,7 +57,8 @@ defmodule Ersventaja.MixProject do
       {:ex_aws_s3, "~> 2.0"},
       {:cors_plug, "~> 3.0"},
       {:open_api_spex, "~> 3.18"},
-      {:tesseract_ocr, "~> 0.1.5"}
+      {:tesseract_ocr, "~> 0.1.5"},
+      {:websockex, "~> 0.5"}
     ]
   end
 

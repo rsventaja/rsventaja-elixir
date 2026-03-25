@@ -13,7 +13,8 @@ defmodule Ersventaja.Policies.Schemas.In.CreatePolicyRequest do
               customer_cpf_or_cnpj: String.t() | nil,
               customer_phone: String.t() | nil,
               customer_email: String.t() | nil,
-              license_plate: String.t() | nil
+              license_plate: String.t() | nil,
+              insurance_type_id: integer() | nil
             ]
           )
 

@@ -6,6 +6,7 @@ defmodule Ersventaja.Policies.Models.Policy do
            only: [:id, :customer_name, :detail, :start_date, :end_date, :calculated]}
 
   alias Ersventaja.Policies.Models.Insurer
+  alias Ersventaja.Policies.Models.InsuranceType
 
   @fields ~w(
     customer_name
@@ -17,6 +18,7 @@ defmodule Ersventaja.Policies.Models.Policy do
     customer_phone
     customer_email
     license_plate
+    insurance_type_id
   )a
 
   @required_fields ~w(
@@ -39,6 +41,7 @@ defmodule Ersventaja.Policies.Models.Policy do
     field(:license_plate, :string)
 
     belongs_to(:insurer, Insurer)
+    belongs_to(:insurance_type, InsuranceType)
 
     timestamps()
   end

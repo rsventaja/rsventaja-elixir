@@ -33,6 +33,59 @@ config :ersventaja, :whatsapp,
   access_token: System.get_env("WHATSAPP_ACCESS_TOKEN"),
   base_url: System.get_env("WHATSAPP_BASE_URL")
 
+# Segfy — api.automation + Upfy Gate (listagem) via Firebase verifyPassword + api.sso.segfy.com/login
+# (valor fora do `config` para evitar ambiguidade de parse com o `if config_env()` abaixo)
+skip_gestao_html_list =
+  case System.get_env("SEGFY_SKIP_GESTAO_HTML_LIST", "1") do
+    v when v in ["0", "false", "no", ""] -> false
+    _ -> true
+  end
+
+segfy_enabled =
+  case System.get_env("SEGFY_ENABLED", "false") do
+    v when v in ["1", "true", "yes"] -> true
+    _ -> false
+  end
+
+multicalculo_socket_enabled =
+  case System.get_env("SEGFY_MULTICALCULO_SOCKET", "1") do
+    v when v in ["0", "false", "no", ""] -> false
+    _ -> true
+  end
+
+config :ersventaja, :segfy,
+  enabled: segfy_enabled,
+  automation_base_url:
+    System.get_env("SEGFY_AUTOMATION_BASE_URL", "https://api.automation.segfy.com"),
+  gestao_base_url: System.get_env("SEGFY_GESTAO_BASE_URL", "https://gestao.segfy.com"),
+  automation_token: System.get_env("SEGFY_AUTOMATION_TOKEN"),
+  # JWT curto para api.automation: POST /auths/token + Basic (par no .env ou extraído deste JS)
+  automation_client_id: System.get_env("SEGFY_AUTOMATION_CLIENT_ID"),
+  automation_client_secret: System.get_env("SEGFY_AUTOMATION_CLIENT_SECRET"),
+  auto_bundle_js_url:
+    System.get_env("SEGFY_AUTO_BUNDLE_JS_URL", "https://bundles.segfy.com/auto-bundle.js"),
+  upfy_gate_base_url: System.get_env("SEGFY_UPFY_GATE_BASE_URL", "https://upfygate.segfy.com"),
+  # Referer/Origin ao chamar gestão como iframe a partir do app (multicalculo)
+  gate_request_origin: System.get_env("SEGFY_GATE_ORIGIN", "https://app.segfy.com"),
+  firebase_web_api_key: System.get_env("SEGFY_FIREBASE_WEB_API_KEY"),
+  login_email: System.get_env("SEGFY_LOGIN_EMAIL"),
+  login_password: System.get_env("SEGFY_LOGIN_PASSWORD"),
+  # Upfy Gate: POST .../automation/api/profile/.../list-by-intranet (token opaco para api.automation)
+  intranet_id: System.get_env("SEGFY_INTRANET_ID"),
+  automation_profile_name: System.get_env("SEGFY_AUTOMATION_PROFILE_NAME"),
+  # Cabeçalhos enviados na api.automation (browser usa app ou gestão conforme o fluxo)
+  automation_request_origin: System.get_env("SEGFY_AUTOMATION_ORIGIN", "https://app.segfy.com"),
+  # Lista HTML no Gestão costuma 302 sem sessão browser; padrão = pular e usar só Upfy Gate budget/list
+  skip_gestao_html_list: skip_gestao_html_list,
+  # Prêmios por seguradora (HFy) chegam via Socket.IO, não no body do POST /calculate
+  multicalculo_socket_enabled: multicalculo_socket_enabled,
+  socket_io_websocket_url:
+    System.get_env(
+      "SEGFY_SOCKET_IO_URL",
+      "wss://socket-io.segfy.com/socket.io/?EIO=4&transport=websocket"
+    ),
+  socket_io_origin: System.get_env("SEGFY_SOCKET_IO_ORIGIN")
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

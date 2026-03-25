@@ -35,6 +35,11 @@ defmodule ErsventajaWeb.Router do
     live("/controlpanel", ControlPanelLive, :index)
   end
 
+  scope "/" do
+    pipe_through(:browser)
+    get("/policies/:id/pdf", ErsventajaWeb.PolicyController, :download_pdf)
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", ErsventajaWeb do
   #   pipe_through :api

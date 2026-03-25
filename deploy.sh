@@ -33,4 +33,8 @@ echo "Deploying to $SSH_HOST (dir: $REMOTE_DIR)"
 ssh -i "$KEY_PATH" -o StrictHostKeyChecking=accept-new "$SSH_HOST" \
   "cd $REMOTE_DIR && REPO_PATH=\$(pwd) && sudo su -c \"cd \\\"\$REPO_PATH\\\" && git config --global --add safe.directory \\\"\$REPO_PATH\\\" && git pull && docker-compose build && docker-compose up -d ersventaja --force-recreate\""
 
+echo "Running database migrations..."
+ssh -i "$KEY_PATH" -o StrictHostKeyChecking=accept-new "$SSH_HOST" \
+  "cd $REMOTE_DIR && sudo docker-compose exec -T ersventaja mix ecto.migrate"
+
 echo "Deploy finished."

@@ -40,26 +40,26 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
         license_plate: "ABC1234"
       }}
   """
-  def extract_policy_info(text, insurers \\ [])
+  def extract_policy_info(text, insurers \\ [], insurance_types \\ [])
 
-  def extract_policy_info(text, insurers) when is_binary(text) do
+  def extract_policy_info(text, insurers, insurance_types) when is_binary(text) do
     api_key = get_api_key()
 
     if is_nil(api_key) or api_key == "" do
       {:error, "OPENAI_API_KEY not found in environment variables"}
     else
       model = System.get_env("OPENAI_MODEL", @default_model)
-      call_gpt_api(text, api_key, model, insurers)
+      call_gpt_api(text, api_key, model, insurers, insurance_types)
     end
   end
 
-  def extract_policy_info(_, _), do: {:error, "Invalid text input"}
+  def extract_policy_info(_, _, _), do: {:error, "Invalid text input"}
 
   defp get_api_key do
     System.get_env("OPENAI_API_KEY")
   end
 
-  defp call_gpt_api(text, api_key, model, insurers) do
+  defp call_gpt_api(text, api_key, model, insurers, insurance_types) do
     prompt = build_prompt(text)
 
     request_body = %{
@@ -67,7 +67,7 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
       messages: [
         %{
           role: "system",
-          content: system_prompt(insurers)
+          content: system_prompt(insurers, insurance_types)
         },
         %{
           role: "user",
@@ -108,7 +108,7 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
     end
   end
 
-  defp system_prompt(insurers) do
+  defp system_prompt(insurers, insurance_types) do
     insurers_list =
       insurers
       |> Enum.map(fn insurer ->
@@ -127,6 +127,49 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
 
         Você DEVE fazer correspondência do nome da seguradora no documento com uma dessas seguradoras e retornar o insurer_id correspondente.
         Se não conseguir encontrar correspondência, retorne null para insurer_id.
+
+        ATENÇÃO CRÍTICA - SEGURADORAS DO GRUPO PORTO:
+        Azul Seguros, Itaú Seguros e Mitsui Seguros pertencem ao grupo Porto Seguro, mas são seguradoras DISTINTAS com CNPJs e produtos diferentes.
+        Documentos da Azul Seguros podem conter referências a "Porto Seguro" ou "Grupo Porto" no rodapé, cabeçalho ou dados corporativos, mas isso NÃO significa que a seguradora é Porto Seguro.
+        Para classificar corretamente, siga esta ordem de prioridade:
+        1. Procure o nome da seguradora no CABEÇALHO PRINCIPAL ou LOGO do documento (ex: "AZUL SEGUROS", "AZUL COMPANHIA DE SEGUROS GERAIS")
+        2. Procure o CNPJ da seguradora e compare:
+           - Porto Seguro: CNPJ 61.198.164/0001-60
+           - Azul Seguros: CNPJ 33.448.150/0001-44 (Azul Companhia de Seguros Gerais)
+           - Itaú Seguros: CNPJ 61.557.039/0001-07
+        3. Se o documento mencionar "Azul" em destaque e "Porto Seguro" apenas como grupo controlador, a seguradora é AZUL, não Porto Seguro
+        4. A mesma lógica se aplica a Itaú Seguros e Mitsui - referências ao grupo Porto não mudam a seguradora emissora
+        """
+      else
+        ""
+      end
+
+    insurance_types_list =
+      insurance_types
+      |> Enum.map(fn type ->
+        id = Map.get(type, :id) || Map.get(type, "id")
+        name = Map.get(type, :name) || Map.get(type, "name")
+        "ID: #{id}, Name: #{name}"
+      end)
+      |> Enum.join("\n")
+
+    insurance_types_section =
+      if length(insurance_types) > 0 do
+        """
+
+        Tipos de seguro disponíveis no banco de dados:
+        #{insurance_types_list}
+
+        Você DEVE identificar o tipo de seguro do documento e retornar o insurance_type_id correspondente.
+        Dicas para identificação:
+        - AUTOMÓVEL: documento menciona veículo, placa, chassi, FIPE, ou dados de condutor
+        - RESIDENCIAL: documento menciona imóvel residencial, endereço de residência, cobertura para moradia
+        - EMPRESARIAL: documento menciona empresa, CNPJ de estabelecimento, cobertura empresarial
+        - RESPONSABILIDADE CIVIL: documento menciona RC, responsabilidade civil, profissional liberal
+        - SEGURO DE VIDA: documento menciona vida, morte, invalidez, beneficiário pessoa física
+        - RISCOS DIVERSOS: documento menciona equipamentos, celular, portáteis, ou não se encaixa nos outros tipos
+        - CAPITALIZAÇÃO: documento menciona título de capitalização, sorteio, capitalização
+        Se não conseguir identificar o tipo, retorne null para insurance_type_id.
         """
       else
         ""
@@ -142,8 +185,14 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
     - customer_cpf_or_cnpj: CPF do cliente (formato XXX.XXX.XXX-XX) ou CNPJ (formato XX.XXX.XXX/XXXX-XX), ou null se não encontrado. ATENÇÃO: NÃO confunda com o CNPJ da seguradora. Procure por seções como "DADOS DO SEGURADO", "DADOS DO CLIENTE", "DADOS DO CONTRATANTE", "DADOS DO PROPONENTE". O CPF/CNPJ do cliente geralmente aparece próximo ao nome do cliente.
     - customer_name: Nome completo do cliente/segurado, ou null se não encontrado. Procure em seções como "DADOS DO SEGURADO", "NOME DO SEGURADO", "CLIENTE", "CONTRATANTE", "PROPONENTE". Geralmente aparece em letras maiúsculas.
     - customer_phone: Telefone do cliente. SEMPRE priorize telefone celular se disponível, caso contrário use telefone fixo. Aceite qualquer formato (com ou sem DDD, com ou sem código do país). Ou null se não encontrado. Procure por campos como "Telefone", "Celular", "Fone", "DDD" seguido de número.
-    - customer_email: E-mail do cliente, ou null se não encontrado. ATENÇÃO: O OCR frequentemente comete erros ao ler o símbolo @ (arroba). Se você encontrar um email que parece ter um caractere estranho no lugar do @ (como Q, O, 0, G, etc.), corrija automaticamente para @. Exemplos: "emailQgmail.com" deve ser corrigido para "email@gmail.com", "emailOgmail.com" deve ser "email@gmail.com". Sempre valide que o email tem formato válido: texto@domínio.extensão
+    - customer_email: E-mail do cliente, ou null se não encontrado.
+      OCR costuma errar o @: trate "|" (pipe) como @ quando separar parte local e domínio (ex.: "ROSECARVELLI|GMAIL.COM" → "ROSECARVELLI@GMAIL.COM").
+      "Q" colado ao domínio após "|" é típico: "nome|QGMAIL.COM" → "nome@gmail.com" (corrija QGMAIL→gmail, QHOTMAIL→hotmail, etc.).
+      Também corrija @ lido como O, 0, G ou Q no meio do endereço (ex.: "emailQgmail.com" → "email@gmail.com").
+      Nunca retorne e-mail sem '@' válido; use null se não der para reconstruir com confiança.
+      Sempre formato válido: local@dominio.extensão (minúsculas no domínio é aceitável).
     - insurer_id: ID da seguradora da lista de seguradoras disponíveis, ou null se não encontrado ou não conseguir fazer correspondência
+    - insurance_type_id: ID do tipo de seguro da lista de tipos disponíveis, ou null se não conseguir identificar. Identifique o tipo com base no conteúdo do documento (veículo = automóvel, imóvel = residencial/empresarial, etc.)
     - license_plate: Placa do veículo (para seguro auto), ou null se não encontrado ou não aplicável. Esta informação deve ir no campo "detail" se for seguro de carro.
       ATENÇÃO CRÍTICA - VALIDAÇÃO OBRIGATÓRIA DE PLACAS: As placas brasileiras têm formatos MUITO ESPECÍFICOS e RÍGIDOS. Você DEVE validar rigorosamente ANTES de retornar qualquer valor:
 
@@ -203,6 +252,7 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
     - IMPORTANTE: Diferencie claramente entre dados do CLIENTE/SEGURADO e dados da SEGURADORA. O CNPJ da seguradora geralmente aparece em seções como "DADOS DA SEGURADORA" ou "DADOS DA SUCURSAL". O CPF/CNPJ do cliente aparece em seções sobre o segurado/cliente.
     - Para telefone: se houver múltiplos números (celular e fixo), SEMPRE retorne o celular. Celulares geralmente têm 9 dígitos após o DDD (formato: XX 9XXXX-XXXX ou similar).
     #{insurers_section}
+    #{insurance_types_section}
     """
   end
 
@@ -248,6 +298,7 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
     |> maybe_parse_date("start_date")
     |> maybe_parse_date("end_date")
     |> maybe_parse_integer("insurer_id")
+    |> maybe_parse_integer("insurance_type_id")
   end
 
   defp normalize_extracted_data(data), do: data

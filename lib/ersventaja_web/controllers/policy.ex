@@ -149,6 +149,24 @@ defmodule ErsventajaWeb.PolicyController do
     |> json(%{error: "Missing encoded_file parameter"})
   end
 
+  def download_pdf(conn, %{"id" => id}) do
+    token = Plug.Conn.get_session(conn, "guardian_default_token")
+
+    case token && Ersventaja.UserManager.Guardian.resource_from_token(token) do
+      {:ok, _user, _claims} ->
+        case Policies.get_policy(String.to_integer(id)) do
+          nil ->
+            conn |> put_status(404) |> json(%{error: "Apólice não encontrada"})
+
+          policy ->
+            send_policy_pdf(conn, policy[:file_name], friendly_filename(policy))
+        end
+
+      _ ->
+        conn |> put_status(401) |> json(%{error: "Não autorizado"})
+    end
+  end
+
   def download_by_token(conn, %{"token" => token}) do
     case Policies.verify_download_token(token) do
       nil ->
@@ -162,7 +180,7 @@ defmodule ErsventajaWeb.PolicyController do
         if is_nil(policy) do
           conn |> put_status(404) |> json(%{error: "Apólice não encontrada"})
         else
-          send_policy_pdf(conn, policy[:file_name])
+          send_policy_pdf(conn, policy[:file_name], friendly_filename(policy))
         end
     end
   end
@@ -170,16 +188,58 @@ defmodule ErsventajaWeb.PolicyController do
   def download_by_token(conn, _),
     do: conn |> put_status(400) |> json(%{error: "Token obrigatório"})
 
-  defp send_policy_pdf(conn, file_name) do
+  defp send_policy_pdf(conn, file_name, download_name) do
     case Policies.download_policy_file(file_name) do
       {:ok, body} ->
         conn
         |> put_resp_content_type("application/pdf")
-        |> put_resp_header("content-disposition", "attachment; filename=\"apolice.pdf\"")
+        |> put_resp_header(
+          "content-disposition",
+          ~s(attachment; filename="#{download_name}")
+        )
         |> send_resp(200, body)
 
       {:error, _} ->
         conn |> put_status(404) |> json(%{error: "Arquivo não encontrado"})
     end
+  end
+
+  defp friendly_filename(policy) do
+    first_name =
+      (policy[:customer_name] || "cliente")
+      |> String.split()
+      |> List.first()
+
+    insurer = policy[:insurer] || "seguradora"
+    insurance_type = policy[:insurance_type] || "seguro"
+
+    start_date =
+      case policy[:start_date] do
+        %Date{} = d -> Calendar.strftime(d, "%m-%Y")
+        s when is_binary(s) -> s |> Date.from_iso8601!() |> Calendar.strftime("%m-%Y")
+        _ -> ""
+      end
+
+    end_date =
+      case policy[:end_date] do
+        %Date{} = d -> Calendar.strftime(d, "%m-%Y")
+        s when is_binary(s) -> s |> Date.from_iso8601!() |> Calendar.strftime("%m-%Y")
+        _ -> ""
+      end
+
+    vigencia = if start_date != "" and end_date != "", do: "#{start_date}_#{end_date}", else: ""
+
+    [first_name, insurer, insurance_type, vigencia]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("_")
+    |> transliterate()
+    |> String.replace(~r/[^a-zA-Z0-9_\-.]/, "_")
+    |> Kernel.<>(".pdf")
+  end
+
+  defp transliterate(str) do
+    str
+    |> String.normalize(:nfd)
+    |> String.replace(~r/[^\x00-\x7F]/, "")
   end
 end

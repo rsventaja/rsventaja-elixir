@@ -1,11 +1,10 @@
 defmodule Ersventaja.Policies.OCR do
   @moduledoc """
-  Module for extracting policy information from PDF files using OCR.
+  Extração de **texto bruto** a partir de PDF (pdftotext e, se necessário, Tesseract).
 
-  This module handles base64 encoded PDF files, extracts text using Tesseract OCR,
-  and parses the text to extract policy information using GPT (OpenAI API).
-  Extracted information includes start_date, end_date, customer_cpf, customer_name,
-  customer_cellphone, customer_email, and other relevant policy data.
+  Este módulo **não** interpreta campos da apólice a partir do texto: o papel do OCR é só
+  gerar string para enviar à **LLM** (`GPTClient.extract_policy_info/2`, `Segfy.AutoPolicyExtractor`, etc.).
+  Todos os campos estruturados vêm do modelo, não de regex/heurísticas no texto OCR.
   """
 
   alias Ersventaja.Policies.OCR.GPTClient
@@ -44,16 +43,16 @@ defmodule Ersventaja.Policies.OCR do
         license_plate: "ABC1234"
       }}
   """
-  def extract_policy_info(file_path, insurers \\ [])
+  def extract_policy_info(file_path, insurers \\ [], insurance_types \\ [])
 
-  def extract_policy_info(file_path, insurers) when is_binary(file_path) do
+  def extract_policy_info(file_path, insurers, insurance_types) when is_binary(file_path) do
     file_path_str = to_string(file_path)
 
     if File.exists?(file_path_str) do
       try do
         result =
           with {:ok, text} <- extract_text(file_path_str),
-               {:ok, info} <- parse_policy_info(text, insurers) do
+               {:ok, info} <- parse_policy_info(text, insurers, insurance_types) do
             {:ok, info}
           else
             {:error, _reason} = error ->
@@ -70,7 +69,17 @@ defmodule Ersventaja.Policies.OCR do
     end
   end
 
-  def extract_policy_info(_, _), do: {:error, :invalid_input}
+  def extract_policy_info(_, _, _), do: {:error, :invalid_input}
+
+  @doc """
+  Apenas texto bruto do PDF (`pdftotext` → fallback Tesseract). **Sem** parsing de campos.
+  O resultado deve ir para uma LLM (`AutoPolicyExtractor`, etc.) — não usar este texto para inferir placa, CPF, etc. por heurística.
+  """
+  def extract_text_from_pdf(file_path) when is_binary(file_path) do
+    extract_text(file_path)
+  end
+
+  def extract_text_from_pdf(_), do: {:error, :invalid_input}
 
   # Private functions
 
@@ -245,7 +254,7 @@ defmodule Ersventaja.Policies.OCR do
     )
 
     result =
-      System.cmd("pdftoppm", ["-png", "-r", "100", pdf_path, output_path], stderr_to_stdout: true)
+      System.cmd("pdftoppm", ["-png", "-r", "300", pdf_path, output_path], stderr_to_stdout: true)
 
     Logger.info("[OCR FALLBACK] pdftoppm finished with result: #{inspect(result)}")
 
@@ -285,10 +294,10 @@ defmodule Ersventaja.Policies.OCR do
       {:error, "Exceção ao converter PDF: #{Exception.message(e)}"}
   end
 
-  defp parse_policy_info(text, insurers) do
+  defp parse_policy_info(text, insurers, insurance_types) do
     require Logger
     Logger.info("[OCR STEP 3] Starting GPT extraction, text size: #{byte_size(text)} bytes")
-    result = GPTClient.extract_policy_info(text, insurers)
+    result = GPTClient.extract_policy_info(text, insurers, insurance_types)
     Logger.info("[OCR STEP 4] GPT extraction complete")
 
     case result do
