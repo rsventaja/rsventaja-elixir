@@ -7,6 +7,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
   alias Ersventaja.Policies
   alias Ersventaja.Policies.OCR
   alias Ersventaja.Segfy.Quotation, as: SegfyQuotation
+  alias Ersventaja.Segfy.Models.SegfyQuotation, as: SegfyQuotationModel
   alias Ersventaja.UserManager.Guardian
 
   @impl true
@@ -63,6 +64,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
           |> assign(selected_client: nil)
           |> assign(segfy_renewal_loading: false)
           |> assign(segfy_premiums_preview: nil)
+          |> assign(segfy_quotation_url: nil)
           |> assign(segfy_enabled: Ersventaja.Segfy.enabled?())
           |> allow_upload(:file,
             accept: ~w(.pdf),
@@ -117,7 +119,8 @@ defmodule ErsventajaWeb.ControlPanelLive do
       assign(socket,
         selected_policy: nil,
         segfy_renewal_loading: false,
-        segfy_premiums_preview: nil
+        segfy_premiums_preview: nil,
+        segfy_quotation_url: nil
       )
 
     {:noreply, push_patch(socket, to: "/controlpanel?tab=#{tab}")}
@@ -232,7 +235,12 @@ defmodule ErsventajaWeb.ControlPanelLive do
         send(parent, {:segfy_renewal_done, result})
       end)
 
-      {:noreply, assign(socket, segfy_renewal_loading: true, segfy_premiums_preview: nil)}
+      {:noreply,
+       assign(socket,
+         segfy_renewal_loading: true,
+         segfy_premiums_preview: nil,
+         segfy_quotation_url: nil
+       )}
     end
   end
 
@@ -303,11 +311,14 @@ defmodule ErsventajaWeb.ControlPanelLive do
     # Find policy in all available lists
     policy = find_policy_by_id(socket, policy_id)
 
+    {premiums_preview, quotation_url} = load_segfy_quotation(policy_id)
+
     {:noreply,
      assign(socket,
        selected_policy: policy,
        segfy_renewal_loading: false,
-       segfy_premiums_preview: nil
+       segfy_premiums_preview: premiums_preview,
+       segfy_quotation_url: quotation_url
      )}
   end
 
@@ -319,7 +330,8 @@ defmodule ErsventajaWeb.ControlPanelLive do
        editing_policy: false,
        edit_form: %{},
        segfy_renewal_loading: false,
-       segfy_premiums_preview: nil
+       segfy_premiums_preview: nil,
+       segfy_quotation_url: nil
      )}
   end
 
@@ -880,34 +892,31 @@ defmodule ErsventajaWeb.ControlPanelLive do
 
     case result do
       {:ok, info} ->
-        msg =
-          cond do
-            is_binary(info[:quotation_url]) and info[:quotation_url] != "" ->
-              "Segfy: foram gerados 2 multicálculos (renovação + novo orçamento) e salvos no mesmo código Gestão. Abra: #{info[:quotation_url]}"
+        premiums_preview = segfy_build_premiums_preview(info)
 
-            info[:quotation_id] ->
-              extra =
-                if info[:codigo_orcamento] do
-                  " Código orçamento gestão: #{info.codigo_orcamento}."
-                else
-                  ""
-                end
+        quotation_url =
+          if is_binary(info[:quotation_url]) and info[:quotation_url] != "",
+            do: info[:quotation_url]
 
-              "Renovação Segfy calculada. Cotação: #{info[:quotation_id]}.#{extra}"
+        # Persist quotation to DB
+        policy = socket.assigns.selected_policy
 
-            true ->
-              "Segfy: operação concluída."
-          end
+        if policy do
+          persist_segfy_quotation(policy.id, info, premiums_preview)
+        end
 
         {:noreply,
          socket
-         |> assign(segfy_premiums_preview: segfy_build_premiums_preview(info))
-         |> put_flash(:success, msg)}
+         |> assign(
+           segfy_premiums_preview: premiums_preview,
+           segfy_quotation_url: quotation_url
+         )
+         |> put_flash(:success, "Segfy: renovação calculada com sucesso.")}
 
       {:error, reason} ->
         {:noreply,
          socket
-         |> assign(segfy_premiums_preview: nil)
+         |> assign(segfy_premiums_preview: nil, segfy_quotation_url: nil)
          |> put_flash(:error, format_segfy_renewal_error(reason))}
     end
   end
@@ -1053,14 +1062,57 @@ defmodule ErsventajaWeb.ControlPanelLive do
   defp format_ocr_error(reason) when is_binary(reason), do: reason
   defp format_ocr_error(reason), do: "Erro: #{inspect(reason)}"
 
+  defp persist_segfy_quotation(policy_id, info, premiums_preview) do
+    require Logger
+
+    ren_rows = Map.get(premiums_preview, :renovation, [])
+
+    attrs = %{
+      policy_id: policy_id,
+      quotation_url: info[:quotation_url],
+      codigo_orcamento: info[:cod],
+      quotation_id: to_string(info[:renovation_quotation_id] || ""),
+      premiums: %{"renovation" => ren_rows}
+    }
+
+    # Upsert: replace previous quotation for this policy
+    case Ersventaja.Repo.get_by(SegfyQuotationModel, policy_id: policy_id) do
+      nil ->
+        %SegfyQuotationModel{}
+        |> SegfyQuotationModel.changeset(attrs)
+        |> Ersventaja.Repo.insert()
+
+      existing ->
+        existing
+        |> SegfyQuotationModel.changeset(attrs)
+        |> Ersventaja.Repo.update()
+    end
+    |> case do
+      {:ok, _} -> :ok
+      {:error, err} -> Logger.error("[SegfyQuotation] persist failed: #{inspect(err)}")
+    end
+  end
+
+  defp load_segfy_quotation(policy_id) do
+    case Ersventaja.Repo.get_by(SegfyQuotationModel, policy_id: policy_id) do
+      nil ->
+        {nil, nil}
+
+      q ->
+        ren_rows = get_in(q.premiums, ["renovation"]) || []
+        preview = %{renovation: ren_rows}
+        url = q.quotation_url
+        {preview, url}
+    end
+  end
+
   defp segfy_build_premiums_preview(info) when is_map(info) do
     %{
-      renovation: segfy_socket_result_rows(Map.get(info, :renovation)),
-      new_quotation: segfy_socket_result_rows(Map.get(info, :new_quotation))
+      renovation: segfy_socket_result_rows(Map.get(info, :renovation))
     }
   end
 
-  defp segfy_build_premiums_preview(_), do: %{renovation: [], new_quotation: []}
+  defp segfy_build_premiums_preview(_), do: %{renovation: []}
 
   defp segfy_socket_result_rows(%{multicalculo_socket_results: list}) when is_list(list) do
     list
@@ -2051,19 +2103,19 @@ defmodule ErsventajaWeb.ControlPanelLive do
                   >
                     <i class="fas fa-file-pdf"></i> Baixar PDF
                   </a>
-                  <%= if @segfy_enabled do %>
+                  <%= if @segfy_enabled and !@segfy_quotation_url do %>
                     <button
                       type="button"
                       phx-click="segfy_calcular_renovacao"
                       disabled={@segfy_renewal_loading}
                       class="btn-primary"
                       style="padding: 12px 24px; font-size: 15px; display: inline-flex; align-items: center; gap: 0.5em; background: linear-gradient(135deg, #0f766e 0%, #0d9488 100%); border: none;"
-                      title="Prosseguir no Gestão, calcula renovação + novas seguradoras e devolve o link do multicálculo (app.segfy.com)"
+                      title="Calcula renovação via Segfy e devolve o link do multicálculo"
                     >
                       <%= if @segfy_renewal_loading do %>
                         <i class="fas fa-spinner fa-spin"></i> Calculando na Segfy…
                       <% else %>
-                        <i class="fas fa-sync-alt"></i> Gerar cotação Segfy (link)
+                        <i class="fas fa-sync-alt"></i> Gerar cotação Segfy
                       <% end %>
                     </button>
                   <% end %>
@@ -2094,9 +2146,22 @@ defmodule ErsventajaWeb.ControlPanelLive do
                 <% ren = Map.get(@segfy_premiums_preview, :renovation, []) %>
                 <% newq = Map.get(@segfy_premiums_preview, :new_quotation, []) %>
                 <div style="margin-top: 1.75em;">
-                  <h3 style="color: #0f766e; font-size: 18px; margin: 0 0 1em 0; display: flex; align-items: center; gap: 0.5em;">
-                    <i class="fas fa-chart-line"></i> Cotações
-                  </h3>
+                  <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1em;">
+                    <h3 style="color: #0f766e; font-size: 18px; margin: 0; display: flex; align-items: center; gap: 0.5em;">
+                      <i class="fas fa-chart-line"></i> Cotações
+                    </h3>
+                    <%= if @segfy_quotation_url do %>
+                      <a
+                        href={@segfy_quotation_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="btn-primary"
+                        style="padding: 8px 18px; font-size: 14px; display: inline-flex; align-items: center; gap: 0.5em; background: linear-gradient(135deg, #059669 0%, #10b981 100%); border: none; border-radius: 8px; color: #fff; text-decoration: none;"
+                      >
+                        <i class="fas fa-external-link-alt"></i> Abrir cotação Segfy
+                      </a>
+                    <% end %>
+                  </div>
                   <%= if ren == [] and newq == [] do %>
                     <p style="font-size: 14px; color: #64748b; margin: 0;">
                       Nenhum resultado recebido das seguradoras.

@@ -22,7 +22,6 @@ defmodule Ersventaja.Segfy.Quotation do
     Budget,
     EmailFix,
     Gestao,
-    GestaoProsseguir,
     MulticalculoSocket,
     Renewal,
     Vehicle
@@ -44,37 +43,90 @@ defmodule Ersventaja.Segfy.Quotation do
   end
 
   @doc """
-  Gera cotação no Segfy (renovação + novo orçamento) e devolve o link `app.segfy.com/.../hfy-auto?q=`.
+  Gera cotação de **renovação** no Segfy e devolve o link `app.segfy.com/.../hfy-auto?q=`.
+
+  Fluxo (espelha o browser — HAR `renovacao_contrato.har`):
+  1. OCR+LLM extrai dados da apólice/PDF
+  2. `POST calculate` (RENOVATION) → `quotation_id`
+  3. `POST SalvaCotacaoAutomation` com `codigoOrcamento=""` → gera e retorna o `cod`
+  4. `POST SalvaCotacaoAutomation` com `codigoOrcamento=<cod>` → persiste
+
+  O código de NEW_QUOTATION permanece disponível em `calculate_and_save/5` para uso futuro.
   """
   def run(policy) when is_map(policy) do
     with :ok <- require_upfy_gate(),
          :ok <- require_automation_token(),
          {:ok, cookie} <- Auth.gate_cookie(),
          {:ok, payload} <- Renewal.prepare_calculate_payload(policy),
-         {:ok, cod, pro_meta} <- GestaoProsseguir.proceed(cookie, apolice_digits(policy)),
-         payload <- Map.put(payload, :prosseguir, pro_meta),
          {:ok, token} <- opaque_token(),
-         {:ok, renovation} <- calculate_and_save(payload, cod, token, cookie, :renovation),
-         {:ok, new_quotation} <- calculate_and_save(payload, cod, token, cookie, :new_quotation) do
+         {:ok, renovation} <- calculate_and_save(payload, "", token, cookie, :renovation),
+         {:ok, cod} <- extract_cod_from_save(renovation),
+         {:ok, _} <- save_with_cod(renovation, cod, token, cookie) do
       ren_qid = quotation_id_from_segfy_step(renovation)
-      new_qid = quotation_id_from_segfy_step(new_quotation)
 
       out = %{
         cod: cod,
         quotation_url: @app_multicalculo <> cod,
         renovation: renovation,
-        new_quotation: new_quotation,
-        renovation_quotation_id: ren_qid,
-        new_quotation_quotation_id: new_qid
+        renovation_quotation_id: ren_qid
       }
 
       Logger.info(
-        "[Segfy Quotation] run/1 concluído: **dois** fluxos (RENOVATION depois NEW_QUOTATION), mesmo link Gestão " <>
-          "cod=#{cod} | quotation_id renovação=#{inspect(ren_qid)} " <>
-          "novo_orçamento=#{inspect(new_qid)}"
+        "[Segfy Quotation] run/1 concluído: RENOVATION " <>
+          "cod=#{cod} | quotation_id=#{inspect(ren_qid)}"
       )
 
       {:ok, out}
+    end
+  end
+
+  # O primeiro SalvaCotacaoAutomation (codigoOrcamento="") retorna o cod como string JSON.
+  defp extract_cod_from_save(%{save: cod}) when is_binary(cod) and cod != "" do
+    # Response pode vir com aspas: "\"69c4100d...\""
+    clean = String.trim(cod, "\"")
+
+    if Regex.match?(~r/^[a-fA-F0-9]+$/, clean) do
+      {:ok, String.downcase(clean)}
+    else
+      Logger.warning("[Segfy Quotation] SalvaCotacao retornou valor inesperado: #{inspect(cod)}")
+      {:error, :unexpected_cod_format}
+    end
+  end
+
+  defp extract_cod_from_save(_), do: {:error, :no_cod_from_save}
+
+  # Segundo save com o cod real para persistir no Gestão.
+  defp save_with_cod(%{calculate: calc_resp} = ren, cod, token, cookie) when is_binary(cod) do
+    save_cookie =
+      case Gestao.warm_hfy_auto_session(cod, cookie) do
+        {:ok, merged} when is_binary(merged) and merged != "" -> merged
+        _ -> cookie
+      end
+
+    request_data = Map.get(ren, :request_data, %{})
+    request_config = Map.get(ren, :request_config, %{})
+    server_qid = quotation_id_from_calculate_response(calc_resp, request_data)
+
+    {body_data, body_cfg} = save_body_maps(calc_resp, request_data, request_config)
+    body_cfg_salva = nest_insurers_for_gestao_salva(body_cfg)
+    body_data_salva = Map.delete(body_data, "commission_all")
+
+    body = %{
+      "quotation_id" => server_qid,
+      "token" => token,
+      "data" => body_data_salva,
+      "config" => body_cfg_salva,
+      "tipo_multicalculo" => "Auto"
+    }
+
+    case Gestao.salva_cotacao_automation(cod, token, body, cookie: save_cookie) do
+      {:ok, _} = ok ->
+        Logger.info("[Segfy Quotation] SalvaCotacao com cod=#{cod} OK")
+        ok
+
+      {:error, reason} ->
+        Logger.warning("[Segfy Quotation] SalvaCotacao com cod=#{cod} falhou: #{inspect(reason)}")
+        {:error, {:salva_with_cod_failed, reason}}
     end
   end
 
@@ -92,15 +144,6 @@ defmodule Ersventaja.Segfy.Quotation do
   defp calculate_mode_human(:renovation), do: "passo 1/2 — renovação RENOVAÇÃO"
   defp calculate_mode_human(:new_quotation), do: "passo 2/2 — novo orçamento NEW_QUOTATION"
   defp calculate_mode_human(other), do: "modo #{inspect(other)}"
-
-  defp apolice_digits(policy) do
-    raw =
-      policy[:policy_number] || policy["policy_number"] ||
-        policy[:numero_apolice] || policy["numero_apolice"] ||
-        policy[:detail] || policy["detail"]
-
-    String.replace(to_string(raw || ""), ~r/[^0-9]/, "")
-  end
 
   defp require_upfy_gate do
     if Ersventaja.Segfy.upfy_gate_configured?(), do: :ok, else: {:error, :missing_upfy_gate_auth}
@@ -1167,7 +1210,9 @@ defmodule Ersventaja.Segfy.Quotation do
     "sompo seguros" => "sompo",
     "alfa seguros" => "alfa",
     "alfa" => "alfa",
-    "suhai" => "suhai"
+    "suhai" => "suhai",
+    "unimed" => "unimed",
+    "unimed seguros" => "unimed"
   }
 
   defp normalize_insurer_slug(name) when is_binary(name) do
@@ -1711,7 +1756,8 @@ defmodule Ersventaja.Segfy.Quotation do
          calculate_request_config,
          multicalculo_socket_results
        ) do
-    # The warm GET may set ASP.NET_SessionId — merge those cookies for the save POST
+    # Sempre aquecer sessão ASP.NET — inclusive quando cod="" (primeiro save),
+    # senão o Gestão retorna HTTP 500 por falta de sessão inicializada.
     save_cookie =
       case Gestao.warm_hfy_auto_session(cod, cookie) do
         {:ok, merged} when is_binary(merged) and merged != "" -> merged
@@ -1757,6 +1803,8 @@ defmodule Ersventaja.Segfy.Quotation do
            save: save_resp,
            mode: mode,
            calculate_outcome: outcome,
+           request_data: request_data,
+           request_config: calculate_request_config,
            multicalculo_socket_results: List.wrap(multicalculo_socket_results)
          }}
 

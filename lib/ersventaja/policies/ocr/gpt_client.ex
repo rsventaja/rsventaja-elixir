@@ -12,8 +12,16 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
   - and other relevant policy information
   """
 
-  @api_url "https://api.openai.com/v1/chat/completions"
+  @default_api_url "https://api.openai.com/v1/chat/completions"
   @default_model "gpt-4o-mini"
+
+  defp api_url do
+    case System.get_env("APP_LLM_BASE_URL") do
+      nil -> @default_api_url
+      "" -> @default_api_url
+      base -> String.trim_trailing(base, "/") <> "/chat/completions"
+    end
+  end
 
   @doc """
   Extracts structured policy information from OCR text using GPT.
@@ -43,10 +51,11 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
   def extract_policy_info(text, insurers \\ [], insurance_types \\ [])
 
   def extract_policy_info(text, insurers, insurance_types) when is_binary(text) do
-    api_key = get_api_key()
+    api_key = get_api_key() || ""
+    using_local_llm? = System.get_env("APP_LLM_BASE_URL") not in [nil, ""]
 
-    if is_nil(api_key) or api_key == "" do
-      {:error, "OPENAI_API_KEY not found in environment variables"}
+    if api_key == "" and not using_local_llm? do
+      {:error, "OPENAI_API_KEY not found (set APP_LLM_BASE_URL for local LLM)"}
     else
       model = System.get_env("OPENAI_MODEL", @default_model)
       call_gpt_api(text, api_key, model, insurers, insurance_types)
@@ -94,7 +103,7 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
       timeout: 60_000
     ]
 
-    case :hackney.post(@api_url, headers, body, hackney_options) do
+    case :hackney.post(api_url(), headers, body, hackney_options) do
       {:ok, status_code, _headers, client_ref} when status_code in [200, 201] ->
         {:ok, response_body} = :hackney.body(client_ref)
         parse_response(response_body)

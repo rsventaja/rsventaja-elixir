@@ -52,10 +52,22 @@ defmodule Ersventaja.Segfy.Renewal do
   end
 
   @doc """
-  Monta o payload `data` para `Vehicle.calculate/2`: tenta **match + show + OCR**;
-  se falhar, usa **apenas OCR+LLM** no PDF da apólice (mesmo pipeline do upload).
+  Monta o payload `data` para `Vehicle.calculate/2` extraindo todos os dados
+  da apólice/PDF via OCR+LLM — sem passar pela listagem Segfy/show.
+
+  O fluxo antigo (match + show + enrich) permanece em `prepare_calculate_payload_via_show/1`
+  para uso futuro caso necessário.
   """
   def prepare_calculate_payload(policy) when is_map(policy) do
+    Logger.info("[Segfy Renewal] prepare_calculate_payload: extraindo direto do PDF via OCR+LLM")
+    prepare_from_ocr_only(policy)
+  end
+
+  @doc """
+  Fluxo legado: tenta match na listagem Segfy + show + OCR.
+  Mantido para uso futuro; não chamado atualmente.
+  """
+  def prepare_calculate_payload_via_show(policy) when is_map(policy) do
     with {:ok, match} <- find_match_gestao_or_gate(policy),
          {:ok, qid, match_meta} <- resolve_quotation_id(policy, match),
          {:ok, show_resp} <- Vehicle.show(qid),
@@ -66,7 +78,7 @@ defmodule Ersventaja.Segfy.Renewal do
     else
       err ->
         Logger.info(
-          "[Segfy Renewal] prepare_calculate_payload: listagem/show falhou (#{inspect(err)}); tentando OCR+LLM no PDF"
+          "[Segfy Renewal] prepare_calculate_payload_via_show: listagem/show falhou (#{inspect(err)}); tentando OCR+LLM no PDF"
         )
 
         prepare_from_ocr_only(policy)
@@ -102,6 +114,7 @@ defmodule Ersventaja.Segfy.Renewal do
           base = minimal_calculate_skeleton()
           merged = AutoPolicyExtractor.merge_calculate_payload(base, extracted)
           merged = json_normalize(merged)
+          merged = apply_policy_overrides_str(merged, policy)
           {:ok, merged}
         else
           e -> {:error, {:ocr_payload_failed, e}}

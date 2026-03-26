@@ -14,7 +14,13 @@ defmodule Ersventaja.Segfy.Gestao do
   def warm_hfy_auto_session(codigo_orcamento, cookie)
       when is_binary(codigo_orcamento) and is_binary(cookie) do
     gb = Ersventaja.Segfy.gestao_base_url() |> String.trim_trailing("/")
-    url = gb <> "/HfyAuto?" <> URI.encode_query(%{"cod" => codigo_orcamento})
+
+    url =
+      if codigo_orcamento == "" do
+        gb <> "/HfyAuto"
+      else
+        gb <> "/HfyAuto?" <> URI.encode_query(%{"cod" => codigo_orcamento})
+      end
 
     case Client.get_follow_redirects(url, cookie, [{"Referer", gb <> "/"}]) do
       {:ok, merged_cookie, _st, _html} -> {:ok, merged_cookie}

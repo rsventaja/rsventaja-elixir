@@ -7,8 +7,16 @@ defmodule Ersventaja.Segfy.AutoPolicyExtractor do
   O JSON retornado é **mesclado** ao payload de `Ersventaja.Segfy.Vehicle.calculate/2` (`merge_calculate_payload/2`).
   """
 
-  @api_url "https://api.openai.com/v1/chat/completions"
+  @default_api_url "https://api.openai.com/v1/chat/completions"
   @default_model "gpt-4o-mini"
+
+  defp api_url do
+    case System.get_env("APP_LLM_BASE_URL") do
+      nil -> @default_api_url
+      "" -> @default_api_url
+      base -> String.trim_trailing(base, "/") <> "/chat/completions"
+    end
+  end
 
   @top_sections ~w(renewal questionnaire coverage customer main_driver vehicle)a
 
@@ -123,10 +131,11 @@ defmodule Ersventaja.Segfy.AutoPolicyExtractor do
   `main_driver`, `vehicle` — apenas o que for inferível do texto.
   """
   def extract_from_ocr_text(text) when is_binary(text) do
-    api_key = System.get_env("OPENAI_API_KEY")
+    api_key = System.get_env("OPENAI_API_KEY") || ""
+    using_local_llm? = System.get_env("APP_LLM_BASE_URL") not in [nil, ""]
 
-    if is_nil(api_key) or api_key == "" do
-      {:error, "OPENAI_API_KEY not set"}
+    if api_key == "" and not using_local_llm? do
+      {:error, "OPENAI_API_KEY not set (set APP_LLM_BASE_URL for local LLM)"}
     else
       model = System.get_env("OPENAI_MODEL", @default_model)
 
@@ -201,7 +210,7 @@ defmodule Ersventaja.Segfy.AutoPolicyExtractor do
       connect_timeout: 10_000
     ]
 
-    case :hackney.post(@api_url, headers, body, hackney_options) do
+    case :hackney.post(api_url(), headers, body, hackney_options) do
       {:ok, status, _headers, resp_body} when status in [200, 201] ->
         parse_openai_response(resp_body)
 
