@@ -294,6 +294,17 @@ defmodule Ersventaja.Policies do
 
   def get_policies_by_cpf_cnpj(_), do: []
 
+  @doc """
+  Same as `get_policies_by_cpf_cnpj/1` but only returns active policies
+  (end_date > today). Used by the WhatsApp bot to avoid showing expired policies.
+  """
+  def get_active_policies_by_cpf_cnpj(cpf_or_cnpj) when is_binary(cpf_or_cnpj) do
+    digits = normalize_cpf_cnpj(cpf_or_cnpj)
+    if digits == "" or byte_size(digits) < 11, do: [], else: do_get_active_policies_by_cpf_cnpj(digits)
+  end
+
+  def get_active_policies_by_cpf_cnpj(_), do: []
+
   defp do_get_policies_by_cpf_cnpj(digits) do
     # Compare normalized: DB may store "123.456.789-00", we search by digits only
     query =
@@ -301,6 +312,25 @@ defmodule Ersventaja.Policies do
         where:
           not is_nil(p.customer_cpf_or_cnpj) and p.customer_cpf_or_cnpj != "" and
             fragment("regexp_replace(?, '[^0-9]', '', 'g')", p.customer_cpf_or_cnpj) == ^digits,
+        order_by: [desc: p.end_date]
+      )
+
+    query
+    |> Repo.all()
+    |> Repo.preload([:insurer, :insurance_type])
+    |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
+    |> Enum.map(&policy_to_response/1)
+  end
+
+  defp do_get_active_policies_by_cpf_cnpj(digits) do
+    today = Date.utc_today()
+
+    query =
+      from(p in Policy,
+        where:
+          not is_nil(p.customer_cpf_or_cnpj) and p.customer_cpf_or_cnpj != "" and
+            fragment("regexp_replace(?, '[^0-9]', '', 'g')", p.customer_cpf_or_cnpj) == ^digits and
+            p.end_date > ^today,
         order_by: [desc: p.end_date]
       )
 

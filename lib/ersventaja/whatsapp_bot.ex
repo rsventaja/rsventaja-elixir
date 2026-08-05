@@ -2,37 +2,20 @@ defmodule Ersventaja.WhatsappBot do
   alias Ersventaja.Lgpd
   alias Ersventaja.Policies
   alias Ersventaja.Whatsapp.MetaApi
+  require Logger
 
   # ETS table for tracking pending consent state per phone number.
   # Key = whatsapp phone number string, Value = %{cpf_cnpj: "...", timestamp: DateTime}
   @pending_consent_table :whatsapp_pending_consent
 
-  @faq [
-    {"oi",
-     "Olá! Sou o assistente da RS Ventaja. Você pode:\n• Digitar *apólice* para baixar sua apólice (informando CPF/CNPJ)\n• Perguntar sobre *renovação*, *contato* ou *produtos*."},
-    {"ola",
-     "Olá! Sou o assistente da RS Ventaja. Você pode:\n• Digitar *apólice* para baixar sua apólice (informando CPF/CNPJ)\n• Perguntar sobre *renovação*, *contato* ou *produtos*."},
-    {"menu",
-     "Opções:\n• *apólice* – Baixar apólice (informe CPF ou CNPJ quando solicitado)\n• *renovação* – Informações sobre renovação\n• *contato* – Falar com a corretora\n• *produtos* – Conhecer nossos produtos\n• *revogar* – Revogar autorização LGPD"},
-    {"renovação",
-     "Para renovar sua apólice, entre em contato com a RS Ventaja pelo e-mail roberto@rsventaja.com ou pelo telefone. Temos prazer em ajudar!"},
-    {"renovacao",
-     "Para renovar sua apólice, entre em contato com a RS Ventaja pelo e-mail roberto@rsventaja.com ou pelo telefone. Temos prazer em ajudar!"},
-    {"contato",
-     "Contato RS Ventaja:\nE-mail: roberto@rsventaja.com\nVisite nosso site para mais informações."},
-    {"contato ",
-     "Contato RS Ventaja:\nE-mail: roberto@rsventaja.com\nVisite nosso site para mais informações."},
-    {"produtos",
-     "Trabalhamos com: Seguro Auto, Residencial, Empresarial, Responsabilidade Civil, Vida e Riscos Diversos. Para cotação ou dúvidas, fale conosco pelo e-mail roberto@rsventaja.com."},
-    {"apólice",
-     "Para enviar o link de download da sua apólice, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."},
-    {"apolice",
-     "Para enviar o link de download da sua apólice, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."},
-    {"baixar",
-     "Para enviar o link de download da sua apólice, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."},
-    {"download",
-     "Para enviar o link de download da sua apólice, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."}
-  ]
+  # Interactive message IDs — must match between sent messages and webhook replies
+  @list_id_apolice "apolice"
+  @list_id_renovacao "renovacao"
+  @list_id_contato "contato"
+  @list_id_produtos "produtos"
+  @list_id_revogar "revogar"
+  @btn_id_consent_sim "consent_sim"
+  @btn_id_consent_nao "consent_nao"
 
   # ---------------------------------------------------------------------------
   # ETS table lifecycle
@@ -68,64 +51,408 @@ defmodule Ersventaja.WhatsappBot do
   defp process_change(%{"value" => value, "field" => "messages"}) do
     messages = value["messages"] || []
     phone_number_id = value["metadata"]["phone_number_id"]
-    require Logger
     Logger.info("[WhatsApp] Processing #{length(messages)} message(s)")
     Enum.each(messages, fn msg -> handle_message(phone_number_id, msg) end)
   end
 
   defp process_change(_), do: :ok
 
-  defp handle_message(phone_number_id, %{
-         "from" => from,
-         "type" => "text",
-         "text" => %{"body" => body}
-       }) do
-    reply = build_reply(String.trim(String.downcase(body)), from, phone_number_id)
+  # ---------------------------------------------------------------------------
+  # Message routing — dispatches by message type
+  # ---------------------------------------------------------------------------
 
-    case MetaApi.send_text(phone_number_id, from, reply) do
-      {:ok, _} ->
-        :ok
+  defp handle_message(phone_number_id, %{"from" => from, "type" => "text", "text" => %{"body" => body}}) do
+    text = String.trim(String.downcase(body))
+    handle_text_message(phone_number_id, from, text)
+  end
 
-      {:error, reason} ->
-        require Logger
-        Logger.warning("[WhatsApp] Reply failed: #{inspect(reason)}")
-    end
+  defp handle_message(phone_number_id, %{"from" => from, "type" => "interactive", "interactive" => interactive}) do
+    handle_interactive_message(phone_number_id, from, interactive)
   end
 
   defp handle_message(phone_number_id, %{"from" => from}) do
     MetaApi.send_text(
       phone_number_id,
       from,
-      "No momento só consigo responder a mensagens de texto. Envie *menu* para ver as opções."
+      "No momento só consigo responder a mensagens de texto ou botões interativos. " <>
+        "Toque nos botões ou envie *menu* para ver as opções."
     )
   end
 
   # ---------------------------------------------------------------------------
-  # Reply routing — consent check before policy lookup
+  # Text message handlers (maintained as fallback)
   # ---------------------------------------------------------------------------
 
-  defp build_reply(text, from, phone_number_id) do
+  defp handle_text_message(phone_number_id, from, text) do
     cond do
       # Revocation command — any time
       String.starts_with?(text, "revogar") ->
-        reply_revoke_consent(from)
+        handle_revoke(phone_number_id, from)
 
       # Consent response ("sim") while there's a pending consent for this phone
       is_consent_affirmative(text) and has_pending_consent(from) ->
-        reply_give_consent_and_policies(from, phone_number_id)
+        give_consent_and_send_policies(phone_number_id, from)
 
       # Consent refusal ("não") while there's a pending consent for this phone
       is_consent_refusal(text) and has_pending_consent(from) ->
-        reply_consent_refused(from)
+        handle_consent_refused(phone_number_id, from)
 
       # CPF/CNPJ detected — check consent first
       looks_like_cpf_cnpj(text) ->
-        reply_check_consent_then_policies(text, from, phone_number_id)
+        check_consent_then_policies(phone_number_id, from, text)
 
-      # Fallback to FAQ
+      # Menu / help keywords — send interactive menu
+      text in ["menu", "oi", "ola", "olá", "help", "ajuda", "inicio", "início", "comecar", "começar"] ->
+        send_main_menu(phone_number_id, from)
+
+      # Old FAQ keyword fallbacks — still respond with relevant info
+      text in ["renovação", "renovacao"] ->
+        send_renovacao_info(phone_number_id, from)
+
+      text in ["contato", "contato "] ->
+        send_contato_info(phone_number_id, from)
+
+      text in ["produtos"] ->
+        send_produtos_info(phone_number_id, from)
+
+      text in ["apólice", "apolice", "baixar", "download"] ->
+        ask_for_cpf(phone_number_id, from)
+
+      # Default — send the interactive menu
       true ->
-        reply_faq_or_default(text)
+        send_main_menu(phone_number_id, from)
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Interactive message handlers (button_reply + list_reply)
+  # ---------------------------------------------------------------------------
+
+  defp handle_interactive_message(phone_number_id, from, %{"type" => "button_reply", "button_reply" => %{"id" => btn_id}}) do
+    case btn_id do
+      @btn_id_consent_sim ->
+        give_consent_and_send_policies(phone_number_id, from)
+
+      @btn_id_consent_nao ->
+        handle_consent_refused(phone_number_id, from)
+
+      _ ->
+        send_main_menu(phone_number_id, from)
+    end
+  end
+
+  defp handle_interactive_message(phone_number_id, from, %{"type" => "list_reply", "list_reply" => %{"id" => list_id}}) do
+    case list_id do
+      @list_id_apolice ->
+        ask_for_cpf(phone_number_id, from)
+
+      @list_id_renovacao ->
+        send_renovacao_info(phone_number_id, from)
+
+      @list_id_contato ->
+        send_contato_info(phone_number_id, from)
+
+      @list_id_produtos ->
+        send_produtos_info(phone_number_id, from)
+
+      @list_id_revogar ->
+        handle_revoke(phone_number_id, from)
+
+      _ ->
+        send_main_menu(phone_number_id, from)
+    end
+  end
+
+  defp handle_interactive_message(phone_number_id, from, _), do: send_main_menu(phone_number_id, from)
+
+  # ---------------------------------------------------------------------------
+  # Menu (interactive list message)
+  # ---------------------------------------------------------------------------
+
+  defp send_main_menu(phone_number_id, from) do
+    sections = [
+      %{
+        title: "Menu principal",
+        rows: [
+          %{id: @list_id_apolice, title: "📋 Baixar apólice", description: "Informe seu CPF/CNPJ"},
+          %{id: @list_id_renovacao, title: "🔄 Renovação", description: "Saiba como renovar"},
+          %{id: @list_id_contato, title: "📞 Contato", description: "Fale com a corretora"},
+          %{id: @list_id_produtos, title: "🛡️ Produtos", description: "Conheça nossos seguros"},
+          %{id: @list_id_revogar, title: "🔒 Revogar LGPD", description: "Revogar autorização de dados"}
+        ]
+      }
+    ]
+
+    MetaApi.send_interactive_list(
+      phone_number_id,
+      from,
+      "Olá! Sou o assistente da *RS Ventaja*. Como posso ajudar?",
+      "Ver opções",
+      sections,
+      footer: "Toque no botão para abrir o menu"
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Apólice flow — ask for CPF → consent → send documents
+  # ---------------------------------------------------------------------------
+
+  defp ask_for_cpf(phone_number_id, from) do
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "Para localizar sua apólice, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."
+    )
+  end
+
+  defp check_consent_then_policies(phone_number_id, from, text) do
+    digits = String.replace(text, ~r/[^0-9]/, "")
+
+    if Lgpd.has_consent?(digits, from) do
+      # Consent already on file — proceed directly to find and send policies
+      send_active_policies(phone_number_id, from, digits)
+    else
+      # No consent — store pending and ask via interactive buttons
+      set_pending_consent(from, digits)
+      send_consent_buttons(phone_number_id, from)
+    end
+  end
+
+  defp send_consent_buttons(phone_number_id, from) do
+    MetaApi.send_interactive_buttons(
+      phone_number_id,
+      from,
+      Lgpd.consent_text(),
+      [
+        %{id: @btn_id_consent_sim, title: "✅ Sim, autorizo"},
+        %{id: @btn_id_consent_nao, title: "❌ Não autorizo"}
+      ]
+    )
+  end
+
+  defp give_consent_and_send_policies(phone_number_id, from) do
+    case get_pending_consent(from) do
+      %{cpf_cnpj: cpf} ->
+        case Lgpd.give_consent(cpf, from) do
+          {:ok, _consent} ->
+            clear_pending_consent(from)
+            MetaApi.send_text(phone_number_id, from, "✅ Autorização LGPD registrada com sucesso.")
+            send_active_policies(phone_number_id, from, cpf)
+
+          {:error, _changeset} ->
+            MetaApi.send_text(
+              phone_number_id,
+              from,
+              "❌ Não foi possível registrar sua autorização. Tente novamente ou entre em contato: roberto@rsventaja.com"
+            )
+        end
+
+      nil ->
+        # No pending consent — user might have clicked an old button
+        send_main_menu(phone_number_id, from)
+    end
+  end
+
+  defp send_active_policies(phone_number_id, from, cpf_cnpj) do
+    policies = Policies.get_active_policies_by_cpf_cnpj(cpf_cnpj)
+
+    case policies do
+      [] ->
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "Não encontrei *apólices vigentes* para o CPF/CNPJ informado. " <>
+            "Verifique os dados ou entre em contato: roberto@rsventaja.com\n\n" <>
+            "Dica: você pode ter apólices vencidas que não aparecem aqui. " <>
+            "Entre em contato com a corretora para mais informações."
+        )
+
+      [single_policy] ->
+        # Single active policy — send the PDF directly via WhatsApp
+        send_policy_document(phone_number_id, from, single_policy)
+
+      several ->
+        # Multiple active policies — send summary with links
+        send_policies_summary(phone_number_id, from, several)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Send a single policy PDF directly via WhatsApp
+  # ---------------------------------------------------------------------------
+
+  defp send_policy_document(phone_number_id, from, policy) do
+    # Build a user-friendly filename
+    filename =
+      [policy.customer_name, policy.detail, policy.insurer]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join(" - ")
+      |> then(fn s -> String.replace(s, ~r/[\/\\:*?"<>|]/, "_") end)
+      |> then(fn s -> "#{s}.pdf" end)
+
+    caption =
+      case policy.end_date do
+        %Date{} = d -> "Vigente até #{Calendar.strftime(d, "%d/%m/%Y")}"
+        s when is_binary(s) -> "Vigente até #{s}"
+        _ -> "Apólice vigente"
+      end
+
+    case Policies.download_policy_file(policy.file_name) do
+      {:ok, file_binary} ->
+        case MetaApi.upload_media(phone_number_id, file_binary, "application/pdf") do
+          {:ok, media_id} ->
+            MetaApi.send_document(phone_number_id, from, {:media_id, media_id},
+              filename: filename,
+              caption: caption
+            )
+
+            # Also send the download link as a backup
+            send_download_link(phone_number_id, from, policy)
+
+          {:error, _reason} ->
+            # Fallback to link if upload fails
+            Logger.warning("[WhatsApp] Media upload failed, falling back to link")
+            send_download_link(phone_number_id, from, policy)
+        end
+
+      {:error, _reason} ->
+        # File not available — just send the link
+        Logger.warning("[WhatsApp] S3 download failed for policy #{policy.id}, falling back to link")
+        send_download_link(phone_number_id, from, policy)
+    end
+  end
+
+  defp send_download_link(phone_number_id, from, policy) do
+    base_url = base_download_url()
+    token = Policies.generate_download_token(policy.id)
+
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "📄 *Link para download:* #{base_url}?token=#{token} (válido por 15 minutos)"
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Multiple policies — summary with links
+  # ---------------------------------------------------------------------------
+
+  defp send_policies_summary(phone_number_id, from, policies) do
+    base_url = base_download_url()
+
+    # Send a header text first
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "🔍 Encontrei *#{length(policies)} apólice(s) vigente(s)*:"
+    )
+
+    # Send each policy's link as a separate message (better UX on WhatsApp)
+    policies
+    |> Enum.with_index(1)
+    |> Enum.each(fn {policy, idx} ->
+      token = Policies.generate_download_token(policy.id)
+      insurer = policy.insurer || "N/A"
+      end_date = format_date(policy.end_date)
+
+      MetaApi.send_text(
+        phone_number_id,
+        from,
+        "*#{idx}. #{policy.detail || policy.customer_name}*\n" <>
+          "Seguradora: #{insurer}\n" <>
+          "Vigente até: #{end_date}\n" <>
+          "📄 #{base_url}?token=#{token}"
+      )
+    end)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Revoke consent
+  # ---------------------------------------------------------------------------
+
+  defp handle_revoke(phone_number_id, from) do
+    case get_pending_consent(from) do
+      %{cpf_cnpj: cpf} ->
+        case Lgpd.revoke_consent(cpf, from, "Solicitado pelo titular via WhatsApp") do
+          {:ok, _} ->
+            clear_pending_consent(from)
+            MetaApi.send_text(
+              phone_number_id,
+              from,
+              "✅ Autorização LGPD revogada com sucesso. Seus dados não serão mais utilizados. " <>
+                "Para consultar apólices novamente, será necessário autorizar novamente."
+            )
+
+          {:error, :not_found} ->
+            MetaApi.send_text(
+              phone_number_id,
+              from,
+              "Não há autorização LGPD ativa para este CPF neste número. Nenhuma ação necessária."
+            )
+        end
+
+      nil ->
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "Para revogar sua autorização LGPD, *informe seu CPF ou CNPJ*. " <>
+            "Assim que identificarmos seu cadastro, a revogação será processada."
+        )
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Consent refusal
+  # ---------------------------------------------------------------------------
+
+  defp handle_consent_refused(phone_number_id, from) do
+    clear_pending_consent(from)
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "Você optou por não autorizar o tratamento dos seus dados. " <>
+        "Sem essa autorização, não posso consultar suas apólices. " <>
+        "Caso mude de ideia, envie seu CPF novamente. " <>
+        "Para falar com a corretora: roberto@rsventaja.com"
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Informational responses
+  # ---------------------------------------------------------------------------
+
+  defp send_renovacao_info(phone_number_id, from) do
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "🔄 *Renovação de Apólice*\n\n" <>
+        "Para renovar sua apólice, entre em contato com a RS Ventaja " <>
+        "pelo e-mail roberto@rsventaja.com ou pelo telefone. " <>
+        "Temos prazer em ajudar!"
+    )
+  end
+
+  defp send_contato_info(phone_number_id, from) do
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "📞 *Contato RS Ventaja*\n\n" <>
+        "E-mail: roberto@rsventaja.com\n" <>
+        "Visite nosso site para mais informações."
+    )
+  end
+
+  defp send_produtos_info(phone_number_id, from) do
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "🛡️ *Nossos Produtos*\n\n" <>
+        "Trabalhamos com: Seguro Auto, Residencial, Empresarial, " <>
+        "Responsabilidade Civil, Vida e Riscos Diversos.\n\n" <>
+        "Para cotação ou dúvidas, fale conosco pelo e-mail roberto@rsventaja.com."
+    )
   end
 
   # ---------------------------------------------------------------------------
@@ -167,96 +494,7 @@ defmodule Ersventaja.WhatsappBot do
   end
 
   # ---------------------------------------------------------------------------
-  # Core reply handlers
-  # ---------------------------------------------------------------------------
-
-  # User wants to revoke consent
-  defp reply_revoke_consent(from) do
-    # We need the CPF to revoke — if there's a pending consent, use that.
-    # Otherwise, tell the user to send their CPF to revoke.
-    case get_pending_consent(from) do
-      %{cpf_cnpj: cpf} ->
-        case Lgpd.revoke_consent(cpf, from, "Solicitado pelo titular via WhatsApp") do
-          {:ok, _} ->
-            clear_pending_consent(from)
-            "✅ Autorização LGPD revogada com sucesso. Seus dados não serão mais utilizados. " <>
-              "Para consultar apólices novamente, será necessário autorizar novamente."
-
-          {:error, :not_found} ->
-            "Não há autorização LGPD ativa para este CPF neste número. Nenhuma ação necessária."
-        end
-
-      nil ->
-        "Para revogar sua autorização LGPD, *informe seu CPF ou CNPJ*. " <>
-          "Assim que identificarmos seu cadastro, a revogação será processada."
-    end
-  end
-
-  # User said "sim" to consent — record and proceed
-  defp reply_give_consent_and_policies(from, _phone_number_id) do
-    %{cpf_cnpj: cpf} = get_pending_consent(from)
-
-    case Lgpd.give_consent(cpf, from) do
-      {:ok, _consent} ->
-        clear_pending_consent(from)
-        # Now look up policies with the consented CPF
-        policies = Policies.get_policies_by_cpf_cnpj(cpf)
-
-        case policies do
-          [] ->
-            "✅ Autorização LGPD registrada. " <>
-              "Não encontrei apólice para o CPF informado. " <>
-              "Verifique os dados ou entre em contato: roberto@rsventaja.com"
-
-          [one] ->
-            base_url = base_download_url()
-            token = Policies.generate_download_token(one.id)
-            "✅ Autorização LGPD registrada. " <>
-              "Encontrei sua apólice. Clique no link para baixar (válido por 15 minutos):\n#{base_url}?token=#{token}"
-
-          several ->
-            base_url = base_download_url()
-            lines =
-              several
-              |> Enum.with_index(1)
-              |> Enum.map(fn {p, i} ->
-                token = Policies.generate_download_token(p.id)
-                "#{i}. #{p.detail || p.customer_name} (#{p.insurer || "N/A"}) – #{format_date(p.end_date)}\n   #{base_url}?token=#{token}"
-              end)
-            "✅ Autorização LGPD registrada. " <>
-              "Encontrei #{length(several)} apólice(s):\n\n#{Enum.join(lines, "\n\n")}"
-        end
-
-      {:error, _changeset} ->
-        "❌ Não foi possível registrar sua autorização. Tente novamente ou entre em contato: roberto@rsventaja.com"
-    end
-  end
-
-  # User sent CPF/CNPJ — check consent first
-  defp reply_check_consent_then_policies(text, from, _phone_number_id) do
-    digits = String.replace(text, ~r/[^0-9]/, "")
-
-    if Lgpd.has_consent?(digits, from) do
-      # Consent already on file for this (CPF, phone) pair — proceed directly
-      reply_policy_by_cpf_cnpj(text, nil)
-    else
-      # No consent — store pending and ask
-      set_pending_consent(from, digits)
-      Lgpd.consent_text()
-    end
-  end
-
-  # Refusal
-  defp reply_consent_refused(from) do
-    clear_pending_consent(from)
-    "Você optou por não autorizar o tratamento dos seus dados. " <>
-      "Sem essa autorização, não posso consultar suas apólices. " <>
-      "Caso mude de ideia, envie seu CPF novamente. " <>
-      "Para falar com a corretora: roberto@rsventaja.com"
-  end
-
-  # ---------------------------------------------------------------------------
-  # Existing helpers (unchanged)
+  # CPF/CNPJ detection
   # ---------------------------------------------------------------------------
 
   defp looks_like_cpf_cnpj(text) do
@@ -265,33 +503,9 @@ defmodule Ersventaja.WhatsappBot do
     len == 11 or len == 14
   end
 
-  defp reply_policy_by_cpf_cnpj(cpf_cnpj, _phone_number_id) do
-    policies = Policies.get_policies_by_cpf_cnpj(cpf_cnpj)
-
-    case policies do
-      [] ->
-        "Não encontrei apólice para o CPF/CNPJ informado. Verifique os dados ou entre em contato com a RS Ventaja: roberto@rsventaja.com"
-
-      [one] ->
-        base_url = base_download_url()
-        token = Policies.generate_download_token(one.id)
-
-        "Encontrei sua apólice. Clique no link para baixar (válido por 15 minutos):\n#{base_url}?token=#{token}"
-
-      several ->
-        lines =
-          several
-          |> Enum.with_index(1)
-          |> Enum.map(fn {p, i} ->
-            token = Policies.generate_download_token(p.id)
-
-            "#{i}. #{p.detail || p.customer_name} (#{p.insurer || "N/A"}) – #{format_date(p.end_date)}\n   #{base_download_url()}?token=#{token}"
-          end)
-
-        "Encontrei #{length(several)} apólice(s). Use os links abaixo:\n\n" <>
-          Enum.join(lines, "\n\n")
-    end
-  end
+  # ---------------------------------------------------------------------------
+  # URL & formatting helpers
+  # ---------------------------------------------------------------------------
 
   defp base_download_url do
     case Application.get_env(:ersventaja, :whatsapp)[:base_url] do
@@ -317,13 +531,4 @@ defmodule Ersventaja.WhatsappBot do
   defp format_date(nil), do: "N/A"
   defp format_date(%Date{} = d), do: Calendar.strftime(d, "%d/%m/%Y")
   defp format_date(s) when is_binary(s), do: s
-
-  defp reply_faq_or_default(text) do
-    key = String.trim(text)
-
-    case Enum.find(@faq, fn {k, _} -> key == k or String.starts_with?(key, k) end) do
-      {_, reply} -> reply
-      nil -> "Não entendi. Envie *menu* para ver as opções disponíveis."
-    end
-  end
 end
