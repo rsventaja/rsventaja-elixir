@@ -308,31 +308,25 @@ defmodule Ersventaja.WhatsappBot do
               caption: caption
             )
 
-            # Also send the download link as a backup
-            send_download_link(phone_number_id, from, policy)
-
           {:error, _reason} ->
-            # Fallback to link if upload fails
-            Logger.warning("[WhatsApp] Media upload failed, falling back to link")
-            send_download_link(phone_number_id, from, policy)
+            Logger.warning("[WhatsApp] Media upload failed for policy #{policy.id}")
+            MetaApi.send_text(
+              phone_number_id,
+              from,
+              "❌ Não foi possível enviar sua apólice no momento. " <>
+                "Tente novamente ou entre em contato: roberto@rsventaja.com"
+            )
         end
 
       {:error, _reason} ->
-        # File not available — just send the link
-        Logger.warning("[WhatsApp] S3 download failed for policy #{policy.id}, falling back to link")
-        send_download_link(phone_number_id, from, policy)
+        Logger.warning("[WhatsApp] S3 download failed for policy #{policy.id}")
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "❌ Não foi possível localizar o arquivo da sua apólice. " <>
+            "Entre em contato: roberto@rsventaja.com"
+        )
     end
-  end
-
-  defp send_download_link(phone_number_id, from, policy) do
-    base_url = base_download_url()
-    token = Policies.generate_download_token(policy.id)
-
-    MetaApi.send_text(
-      phone_number_id,
-      from,
-      "📄 *Link para download:* #{base_url}?token=#{token} (válido por 15 minutos)"
-    )
   end
 
   # ---------------------------------------------------------------------------
