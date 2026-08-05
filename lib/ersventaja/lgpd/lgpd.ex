@@ -7,10 +7,10 @@ defmodule Ersventaja.Lgpd do
 
   ## Design decisions
 
-    - Consent is keyed by CPF/CNPJ (normalized digits), not by phone number.
-      Once a person gives consent for their document, any WhatsApp number
-      can query policies for that document. This matches the user's
-      requirement: "uma vez dado não precisa dar de novo."
+    - Consent is keyed by (CPF/CNPJ + WhatsApp phone) pair. A person can
+      consent from multiple phones, and each phone must consent independently.
+      This prevents unauthorized access: Bob cannot query Alice's policies
+      from his phone just because Alice consented from hers.
 
     - The exact consent text shown to the user is stored as evidence
       (Art. 8º §2º — burden of proof on the controller).
@@ -66,23 +66,26 @@ defmodule Ersventaja.Lgpd do
   def consent_version, do: @consent_version
 
   @doc """
-  Checks whether valid (non-revoked) consent exists for the given CPF/CNPJ.
+  Checks whether valid (non-revoked) consent exists for the given
+  CPF/CNPJ _and_ WhatsApp phone number pair.
 
-  Normalizes the input to digits-only before querying.
+  Both must match — consent given by one phone does not grant access
+  to a different phone, even for the same CPF.
 
   ## Examples
 
-      iex> has_consent?("123.456.789-00")
+      iex> has_consent?("123.456.789-00", "5511999999999")
       false
 
   """
-  @spec has_consent?(String.t()) :: boolean()
-  def has_consent?(cpf_cnpj) when is_binary(cpf_cnpj) do
+  @spec has_consent?(String.t(), String.t()) :: boolean()
+  def has_consent?(cpf_cnpj, whatsapp_phone) when is_binary(cpf_cnpj) do
     digits = normalize(cpf_cnpj)
 
     query =
       from(c in Consent,
         where: c.cpf_cnpj == ^digits,
+        where: c.whatsapp_phone == ^whatsapp_phone,
         where: is_nil(c.revoked_at)
       )
 
@@ -92,14 +95,16 @@ defmodule Ersventaja.Lgpd do
   @doc """
   Records that a user gave LGPD consent for the given CPF/CNPJ.
 
-  Returns `{:ok, consent}` on success, `{:error, changeset}` on failure
-  (e.g. duplicate consent — should not happen if `has_consent?/1` is
-  checked first).
+  Consent is per (CPF + phone) pair. The same CPF can consent from
+  multiple phones independently; each gets its own record.
+
+  Uses upsert: if this (CPF, phone) pair already has a record (including
+  revoked), it is reactivated rather than creating a duplicate.
 
   ## Parameters
 
     - `cpf_cnpj` — the normalized (digits-only) CPF or CNPJ
-    - `whatsapp_phone` — the WhatsApp phone number that gave consent (audit trail)
+    - `whatsapp_phone` — the WhatsApp phone number that gave consent
     - `opts` — optional overrides for `:source`, `:policy_version`, `:consent_text_shown`
   """
   @spec give_consent(String.t(), String.t(), keyword()) ::
@@ -118,40 +123,40 @@ defmodule Ersventaja.Lgpd do
       revocation_reason: nil
     }
 
-    # Upsert: if a record (including revoked) already exists for this CPF,
-    # update it in place rather than failing with a PK conflict.
-    # This allows re-consent after revocation.
+    # Upsert on (cpf_cnpj, whatsapp_phone) pair: reactivates a revoked
+    # consent or updates an existing one instead of failing with a
+    # unique-constraint violation.
     Repo.insert(
       Consent.changeset(%Consent{}, attrs),
       on_conflict: [set: [consented_at: attrs.consented_at,
-                          whatsapp_phone: attrs.whatsapp_phone,
                           consent_text_shown: attrs.consent_text_shown,
                           policy_version: attrs.policy_version,
                           source: attrs.source,
                           revoked_at: nil,
                           revocation_reason: nil,
                           updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]],
-      conflict_target: :cpf_cnpj
+      conflict_target: [:cpf_cnpj, :whatsapp_phone]
     )
   end
 
   @doc """
-  Revokes a previously-given consent.
+  Revokes a previously-given consent for a specific (CPF, phone) pair.
 
   Consent is soft-deleted: `revoked_at` is set but the record is kept
   for the audit trail (burden of proof, Art. 8º §2º).
 
   Returns `{:ok, consent}` on success, `{:error, :not_found}` if no
-  active consent exists for the given CPF/CNPJ.
+  active consent exists for the given CPF/CNPJ + phone pair.
   """
-  @spec revoke_consent(String.t(), String.t() | nil) ::
+  @spec revoke_consent(String.t(), String.t(), String.t() | nil) ::
           {:ok, Consent.t()} | {:error, :not_found}
-  def revoke_consent(cpf_cnpj, reason \\ nil) do
+  def revoke_consent(cpf_cnpj, whatsapp_phone, reason \\ nil) do
     digits = normalize(cpf_cnpj)
 
     query =
       from(c in Consent,
         where: c.cpf_cnpj == ^digits,
+        where: c.whatsapp_phone == ^whatsapp_phone,
         where: is_nil(c.revoked_at)
       )
 
@@ -171,12 +176,12 @@ defmodule Ersventaja.Lgpd do
   end
 
   @doc """
-  Returns the consent record for a given CPF/CNPJ, if any.
+  Returns the consent record for a given (CPF/CNPJ, phone) pair, if any.
   """
-  @spec get_consent(String.t()) :: Consent.t() | nil
-  def get_consent(cpf_cnpj) do
+  @spec get_consent(String.t(), String.t()) :: Consent.t() | nil
+  def get_consent(cpf_cnpj, whatsapp_phone) do
     digits = normalize(cpf_cnpj)
-    Repo.get(Consent, digits)
+    Repo.get_by(Consent, cpf_cnpj: digits, whatsapp_phone: whatsapp_phone)
   end
 
   # ---------------------------------------------------------------------------
@@ -227,11 +232,24 @@ defmodule Ersventaja.Lgpd do
 
   defp extract_message_id(%{"entry" => entries}) when is_list(entries) do
     Enum.find_value(entries, fn entry ->
-      get_in(entry, ["changes", Access.all(), "value", "messages", Access.all(), "id"])
-      |> case do
-        [id | _] when is_binary(id) -> id
-        _ -> nil
-      end
+      # WhatsApp sends either "messages" or "statuses" — check both.
+      # get_in with multiple Access.all() levels returns nested lists,
+      # so we flatten before searching.
+      msg_id =
+        entry
+        |> get_in(["changes", Access.all(), "value", "messages", Access.all(), "id"])
+        |> List.wrap()
+        |> List.flatten()
+        |> Enum.find(&is_binary/1)
+
+      status_id =
+        entry
+        |> get_in(["changes", Access.all(), "value", "statuses", Access.all(), "id"])
+        |> List.wrap()
+        |> List.flatten()
+        |> Enum.find(&is_binary/1)
+
+      msg_id || status_id
     end)
   end
 
@@ -239,11 +257,22 @@ defmodule Ersventaja.Lgpd do
 
   defp extract_from_phone(%{"entry" => entries}) when is_list(entries) do
     Enum.find_value(entries, fn entry ->
-      get_in(entry, ["changes", Access.all(), "value", "messages", Access.all(), "from"])
-      |> case do
-        [phone | _] when is_binary(phone) -> phone
-        _ -> nil
-      end
+      # Incoming messages have "from", status updates have "recipient_id"
+      from =
+        entry
+        |> get_in(["changes", Access.all(), "value", "messages", Access.all(), "from"])
+        |> List.wrap()
+        |> List.flatten()
+        |> Enum.find(&is_binary/1)
+
+      recipient =
+        entry
+        |> get_in(["changes", Access.all(), "value", "statuses", Access.all(), "recipient_id"])
+        |> List.wrap()
+        |> List.flatten()
+        |> Enum.find(&is_binary/1)
+
+      from || recipient
     end)
   end
 
@@ -251,11 +280,11 @@ defmodule Ersventaja.Lgpd do
 
   defp extract_phone_number_id(%{"entry" => entries}) when is_list(entries) do
     Enum.find_value(entries, fn entry ->
-      get_in(entry, ["changes", Access.all(), "value", "metadata", "phone_number_id"])
-      |> case do
-        [id | _] when is_binary(id) -> id
-        _ -> nil
-      end
+      entry
+      |> get_in(["changes", Access.all(), "value", "metadata", "phone_number_id"])
+      |> List.wrap()
+      |> List.flatten()
+      |> Enum.find(&is_binary/1)
     end)
   end
 

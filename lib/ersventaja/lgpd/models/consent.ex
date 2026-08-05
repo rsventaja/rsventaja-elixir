@@ -2,9 +2,8 @@ defmodule Ersventaja.Lgpd.Models.Consent do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @primary_key {:cpf_cnpj, :string, autogenerate: false}
-
   @fields ~w(
+    cpf_cnpj
     consented_at
     whatsapp_phone
     consent_text_shown
@@ -15,11 +14,14 @@ defmodule Ersventaja.Lgpd.Models.Consent do
   )a
 
   @required ~w(
+    cpf_cnpj
     consented_at
+    whatsapp_phone
     consent_text_shown
   )a
 
   schema "lgpd_consents" do
+    field(:cpf_cnpj, :string)
     field(:consented_at, :utc_datetime_usec)
     field(:whatsapp_phone, :string)
     field(:consent_text_shown, :string)
@@ -34,10 +36,12 @@ defmodule Ersventaja.Lgpd.Models.Consent do
   @doc false
   def changeset(consent, attrs) do
     consent
-    |> cast(attrs, [:cpf_cnpj | @fields])
-    |> validate_required([:cpf_cnpj | @required])
+    |> cast(attrs, @fields)
+    |> validate_required(@required)
     |> validate_length(:cpf_cnpj, min: 11, max: 14)
     |> validate_format(:cpf_cnpj, ~r/^\d+$/, message: "must contain only digits")
-    |> unique_constraint(:cpf_cnpj, name: :lgpd_consents_pkey)
+    |> unique_constraint([:cpf_cnpj, :whatsapp_phone],
+      name: :lgpd_consents_cpf_cnpj_whatsapp_phone_index
+    )
   end
 end

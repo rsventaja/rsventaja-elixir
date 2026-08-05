@@ -176,14 +176,14 @@ defmodule Ersventaja.WhatsappBot do
     # Otherwise, tell the user to send their CPF to revoke.
     case get_pending_consent(from) do
       %{cpf_cnpj: cpf} ->
-        case Lgpd.revoke_consent(cpf, "Solicitado pelo titular via WhatsApp") do
+        case Lgpd.revoke_consent(cpf, from, "Solicitado pelo titular via WhatsApp") do
           {:ok, _} ->
             clear_pending_consent(from)
             "✅ Autorização LGPD revogada com sucesso. Seus dados não serão mais utilizados. " <>
               "Para consultar apólices novamente, será necessário autorizar novamente."
 
           {:error, :not_found} ->
-            "Não há autorização LGPD ativa para este CPF. Nenhuma ação necessária."
+            "Não há autorização LGPD ativa para este CPF neste número. Nenhuma ação necessária."
         end
 
       nil ->
@@ -236,8 +236,8 @@ defmodule Ersventaja.WhatsappBot do
   defp reply_check_consent_then_policies(text, from, _phone_number_id) do
     digits = String.replace(text, ~r/[^0-9]/, "")
 
-    if Lgpd.has_consent?(digits) do
-      # Consent already on file — proceed directly
+    if Lgpd.has_consent?(digits, from) do
+      # Consent already on file for this (CPF, phone) pair — proceed directly
       reply_policy_by_cpf_cnpj(text, nil)
     else
       # No consent — store pending and ask
