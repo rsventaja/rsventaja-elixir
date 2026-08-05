@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Deploy ersventaja to EC2: SSH in, pull, build, and restart the app container.
 # Requires .deploy.env (copy from .deploy.env.example). Usage: ./deploy.sh
+#
+# Elixir/Erlang versions in production come from Dockerfile; keep them in sync
+# with .tool-versions for local development (mise).
 
 set -e
 

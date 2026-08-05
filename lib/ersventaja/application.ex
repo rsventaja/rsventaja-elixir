@@ -7,6 +7,9 @@ defmodule Ersventaja.Application do
 
   @impl true
   def start(_type, _args) do
+    # Initialize ETS tables for WhatsApp bot state
+    Ersventaja.WhatsappBot.init()
+
     children = [
       # Start the Ecto repository
       Ersventaja.Repo,

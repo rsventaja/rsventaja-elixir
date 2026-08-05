@@ -1,5 +1,5 @@
-# Use the same base image as production
-FROM bitwalker/alpine-elixir-phoenix:1.14
+# Keep in sync with .tool-versions and production Dockerfile.
+FROM hexpm/elixir:1.16.3-erlang-26.2.5.21-alpine-3.20.9
 
 # Install additional build dependencies needed for native compilation
 # Also install Tesseract OCR, Portuguese language pack, and poppler-utils for PDF to image conversion

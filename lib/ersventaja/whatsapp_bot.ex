@@ -1,6 +1,11 @@
 defmodule Ersventaja.WhatsappBot do
+  alias Ersventaja.Lgpd
   alias Ersventaja.Policies
   alias Ersventaja.Whatsapp.MetaApi
+
+  # ETS table for tracking pending consent state per phone number.
+  # Key = whatsapp phone number string, Value = %{cpf_cnpj: "...", timestamp: DateTime}
+  @pending_consent_table :whatsapp_pending_consent
 
   @faq [
     {"oi",
@@ -8,7 +13,7 @@ defmodule Ersventaja.WhatsappBot do
     {"ola",
      "Olá! Sou o assistente da RS Ventaja. Você pode:\n• Digitar *apólice* para baixar sua apólice (informando CPF/CNPJ)\n• Perguntar sobre *renovação*, *contato* ou *produtos*."},
     {"menu",
-     "Opções:\n• *apólice* – Baixar apólice (informe CPF ou CNPJ quando solicitado)\n• *renovação* – Informações sobre renovação\n• *contato* – Falar com a corretora\n• *produtos* – Conhecer nossos produtos"},
+     "Opções:\n• *apólice* – Baixar apólice (informe CPF ou CNPJ quando solicitado)\n• *renovação* – Informações sobre renovação\n• *contato* – Falar com a corretora\n• *produtos* – Conhecer nossos produtos\n• *revogar* – Revogar autorização LGPD"},
     {"renovação",
      "Para renovar sua apólice, entre em contato com a RS Ventaja pelo e-mail roberto@rsventaja.com ou pelo telefone. Temos prazer em ajudar!"},
     {"renovacao",
@@ -28,6 +33,27 @@ defmodule Ersventaja.WhatsappBot do
     {"download",
      "Para enviar o link de download da sua apólice, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."}
   ]
+
+  # ---------------------------------------------------------------------------
+  # ETS table lifecycle
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Initializes the ETS table for pending consent state.
+  Called from Application.start/2.
+  """
+  def init do
+    unless :ets.whereis(@pending_consent_table) != :undefined do
+      @pending_consent_table =
+        :ets.new(@pending_consent_table, [:set, :public, :named_table, read_concurrency: true])
+    end
+
+    :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Webhook processing
+  # ---------------------------------------------------------------------------
 
   def process_webhook(%{"object" => "whatsapp_business_account", "entry" => entries}) do
     Enum.each(entries, &process_entry/1)
@@ -74,12 +100,164 @@ defmodule Ersventaja.WhatsappBot do
     )
   end
 
-  defp build_reply(text, _from, phone_number_id) do
+  # ---------------------------------------------------------------------------
+  # Reply routing — consent check before policy lookup
+  # ---------------------------------------------------------------------------
+
+  defp build_reply(text, from, phone_number_id) do
     cond do
-      looks_like_cpf_cnpj(text) -> reply_policy_by_cpf_cnpj(text, phone_number_id)
-      true -> reply_faq_or_default(text)
+      # Revocation command — any time
+      String.starts_with?(text, "revogar") ->
+        reply_revoke_consent(from)
+
+      # Consent response ("sim") while there's a pending consent for this phone
+      is_consent_affirmative(text) and has_pending_consent(from) ->
+        reply_give_consent_and_policies(from, phone_number_id)
+
+      # Consent refusal ("não") while there's a pending consent for this phone
+      is_consent_refusal(text) and has_pending_consent(from) ->
+        reply_consent_refused(from)
+
+      # CPF/CNPJ detected — check consent first
+      looks_like_cpf_cnpj(text) ->
+        reply_check_consent_then_policies(text, from, phone_number_id)
+
+      # Fallback to FAQ
+      true ->
+        reply_faq_or_default(text)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Consent helpers
+  # ---------------------------------------------------------------------------
+
+  defp is_consent_affirmative(text) do
+    text in ["sim", "s", "sí", "si", "aceito", "autorizo", "concordo", "ok", "yes", "y"]
+  end
+
+  defp is_consent_refusal(text) do
+    text in ["não", "nao", "n", "negar", "recuso", "no", "nope", "negativo"]
+  end
+
+  # ---------------------------------------------------------------------------
+  # Pending consent state (ETS-backed)
+  # ---------------------------------------------------------------------------
+
+  defp has_pending_consent(from) do
+    case :ets.lookup(@pending_consent_table, from) do
+      [{^from, _}] -> true
+      [] -> false
+    end
+  end
+
+  defp get_pending_consent(from) do
+    case :ets.lookup(@pending_consent_table, from) do
+      [{^from, data}] -> data
+      [] -> nil
+    end
+  end
+
+  defp set_pending_consent(from, cpf_cnpj) do
+    :ets.insert(@pending_consent_table, {from, %{cpf_cnpj: cpf_cnpj, timestamp: DateTime.utc_now()}})
+  end
+
+  defp clear_pending_consent(from) do
+    :ets.delete(@pending_consent_table, from)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Core reply handlers
+  # ---------------------------------------------------------------------------
+
+  # User wants to revoke consent
+  defp reply_revoke_consent(from) do
+    # We need the CPF to revoke — if there's a pending consent, use that.
+    # Otherwise, tell the user to send their CPF to revoke.
+    case get_pending_consent(from) do
+      %{cpf_cnpj: cpf} ->
+        case Lgpd.revoke_consent(cpf, "Solicitado pelo titular via WhatsApp") do
+          {:ok, _} ->
+            clear_pending_consent(from)
+            "✅ Autorização LGPD revogada com sucesso. Seus dados não serão mais utilizados. " <>
+              "Para consultar apólices novamente, será necessário autorizar novamente."
+
+          {:error, :not_found} ->
+            "Não há autorização LGPD ativa para este CPF. Nenhuma ação necessária."
+        end
+
+      nil ->
+        "Para revogar sua autorização LGPD, *informe seu CPF ou CNPJ*. " <>
+          "Assim que identificarmos seu cadastro, a revogação será processada."
+    end
+  end
+
+  # User said "sim" to consent — record and proceed
+  defp reply_give_consent_and_policies(from, _phone_number_id) do
+    %{cpf_cnpj: cpf} = get_pending_consent(from)
+
+    case Lgpd.give_consent(cpf, from) do
+      {:ok, _consent} ->
+        clear_pending_consent(from)
+        # Now look up policies with the consented CPF
+        policies = Policies.get_policies_by_cpf_cnpj(cpf)
+
+        case policies do
+          [] ->
+            "✅ Autorização LGPD registrada. " <>
+              "Não encontrei apólice para o CPF informado. " <>
+              "Verifique os dados ou entre em contato: roberto@rsventaja.com"
+
+          [one] ->
+            base_url = base_download_url()
+            token = Policies.generate_download_token(one.id)
+            "✅ Autorização LGPD registrada. " <>
+              "Encontrei sua apólice. Clique no link para baixar (válido por 15 minutos):\n#{base_url}?token=#{token}"
+
+          several ->
+            base_url = base_download_url()
+            lines =
+              several
+              |> Enum.with_index(1)
+              |> Enum.map(fn {p, i} ->
+                token = Policies.generate_download_token(p.id)
+                "#{i}. #{p.detail || p.customer_name} (#{p.insurer || "N/A"}) – #{format_date(p.end_date)}\n   #{base_url}?token=#{token}"
+              end)
+            "✅ Autorização LGPD registrada. " <>
+              "Encontrei #{length(several)} apólice(s):\n\n#{Enum.join(lines, "\n\n")}"
+        end
+
+      {:error, _changeset} ->
+        "❌ Não foi possível registrar sua autorização. Tente novamente ou entre em contato: roberto@rsventaja.com"
+    end
+  end
+
+  # User sent CPF/CNPJ — check consent first
+  defp reply_check_consent_then_policies(text, from, _phone_number_id) do
+    digits = String.replace(text, ~r/[^0-9]/, "")
+
+    if Lgpd.has_consent?(digits) do
+      # Consent already on file — proceed directly
+      reply_policy_by_cpf_cnpj(text, nil)
+    else
+      # No consent — store pending and ask
+      set_pending_consent(from, digits)
+      Lgpd.consent_text()
+    end
+  end
+
+  # Refusal
+  defp reply_consent_refused(from) do
+    clear_pending_consent(from)
+    "Você optou por não autorizar o tratamento dos seus dados. " <>
+      "Sem essa autorização, não posso consultar suas apólices. " <>
+      "Caso mude de ideia, envie seu CPF novamente. " <>
+      "Para falar com a corretora: roberto@rsventaja.com"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Existing helpers (unchanged)
+  # ---------------------------------------------------------------------------
 
   defp looks_like_cpf_cnpj(text) do
     digits = String.replace(text, ~r/[^0-9]/, "")

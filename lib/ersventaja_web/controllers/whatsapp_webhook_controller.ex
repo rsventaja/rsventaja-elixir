@@ -33,6 +33,10 @@ defmodule ErsventajaWeb.WhatsappWebhookController do
       if verify_signature(conn, raw_body) do
         payload = Jason.decode!(raw_body)
         Logger.info("[WhatsApp] Payload processed, object: #{inspect(payload["object"])}")
+
+        # Archive the full webhook payload for LGPD audit trail
+        Ersventaja.Lgpd.store_webhook_payload(payload, raw_body)
+
         Ersventaja.WhatsappBot.process_webhook(payload)
         conn |> put_status(200) |> json(%{ok: true})
       else

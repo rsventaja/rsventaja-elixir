@@ -564,64 +564,159 @@ defmodule Ersventaja.Segfy.Renewal do
         {:ok, veh}
 
       true ->
-        params =
-          %{
-            "brand" => brand,
-            "model_year" => model_year,
-            "vehicle_type" => vehicle_type
-          }
-          |> maybe_put_model_list_brand_id(veh)
+        case try_model_list_for_brand(brand, model_year, vehicle_type, fipe_code, model_name, veh) do
+          {:ok, _} = ok ->
+            ok
 
-        Logger.info(
-          "[Segfy Renewal] model-list request brand=#{inspect(brand)} model_year=#{inspect(model_year)} " <>
-            "vehicle_type=#{inspect(vehicle_type)} brand_id?=#{params["brand_id"] != nil} " <>
-            "fipe_code=#{inspect(fipe_code)} model=#{inspect(truncate_model_name(model_name))}"
-        )
+          {:no_match, models_count} ->
+            # Fallback: se model-list retornou 0 modelos ou sem match no FIPE,
+            # tentar marcas alternativas usando brand-list do Segfy
+            case try_brand_fallback(brand, model_year, vehicle_type, fipe_code, model_name, veh) do
+              {:ok, _} = ok ->
+                ok
 
-        case Vehicle.model_list(params) do
-          {:ok, resp} ->
-            models = model_list_extract_models(resp)
-            n = length(models)
-
-            Logger.info(
-              "[Segfy Renewal] model-list OK models_count=#{n} resp_keys=#{inspect(Map.keys(resp))} " <>
-                "sample=#{inspect(model_list_sample_for_log(models, 4))}"
-            )
-
-            match = find_fipe_model(models, fipe_code, model_name, veh["fipe_value"])
-
-            case match do
-              nil ->
+              :no_fallback ->
                 if not valid_fipe_value?(veh["fipe_value"]) do
                   Logger.warning(
-                    "[Segfy Renewal] model-list sem match para FIPE fipe_code=#{inspect(fipe_code)} " <>
-                      "model=#{inspect(truncate_model_name(model_name))} fipe_value=#{inspect(veh["fipe_value"])} " <>
-                      "models_count=#{n}"
+                    "[Segfy Renewal] model-list sem match após fallback de marcas " <>
+                      "fipe_code=#{inspect(fipe_code)} brand_original=#{inspect(brand)} " <>
+                      "model=#{inspect(truncate_model_name(model_name))} models_count=#{models_count}"
                   )
                 end
 
                 {:ok, veh}
-
-              m ->
-                veh2 = apply_model_list_match_to_vehicle(veh, m)
-                label = veh2["model"]
-
-                Logger.info(
-                  "[Segfy Renewal] model-list aplicado fipe_value=#{inspect(veh2["fipe_value"])} " <>
-                    "model=#{inspect(truncate_model_name(label))}"
-                )
-
-                {:ok, veh2}
             end
 
-          {:error, reason} = e ->
-            Logger.warning("[Segfy Renewal] model-list HTTP/erro reason=#{inspect(reason)}")
+          {:error, _} = e ->
             e
         end
     end
   end
 
   def enrich_vehicle_from_segfy_model_list(_), do: {:error, :invalid_vehicle}
+
+  # Tenta model-list para uma marca específica e retorna {:ok, veh}, {:no_match, count}, ou {:error, reason}
+  defp try_model_list_for_brand(brand, model_year, vehicle_type, fipe_code, model_name, veh) do
+    params =
+      %{
+        "brand" => brand,
+        "model_year" => model_year,
+        "vehicle_type" => vehicle_type
+      }
+      |> maybe_put_model_list_brand_id(veh)
+
+    Logger.info(
+      "[Segfy Renewal] model-list request brand=#{inspect(brand)} model_year=#{inspect(model_year)} " <>
+        "vehicle_type=#{inspect(vehicle_type)} brand_id?=#{params["brand_id"] != nil} " <>
+        "fipe_code=#{inspect(fipe_code)} model=#{inspect(truncate_model_name(model_name))}"
+    )
+
+    case Vehicle.model_list(params) do
+      {:ok, resp} ->
+        models = model_list_extract_models(resp)
+        n = length(models)
+
+        Logger.info(
+          "[Segfy Renewal] model-list OK models_count=#{n} resp_keys=#{inspect(Map.keys(resp))} " <>
+            "sample=#{inspect(model_list_sample_for_log(models, 4))}"
+        )
+
+        match = find_fipe_model(models, fipe_code, model_name, veh["fipe_value"])
+
+        case match do
+          nil ->
+            {:no_match, n}
+
+          m ->
+            veh2 = apply_model_list_match_to_vehicle(veh, m)
+            # Atualizar a marca também, caso tenha vindo de fallback
+            veh2 = Map.put(veh2, "brand", brand)
+            label = veh2["model"]
+
+            Logger.info(
+              "[Segfy Renewal] model-list aplicado fipe_value=#{inspect(veh2["fipe_value"])} " <>
+                "model=#{inspect(truncate_model_name(label))}"
+            )
+
+            {:ok, veh2}
+        end
+
+      {:error, reason} = e ->
+        Logger.warning("[Segfy Renewal] model-list HTTP/erro reason=#{inspect(reason)}")
+        e
+    end
+  end
+
+  # Busca marcas alternativas no brand-list e tenta model-list para cada uma
+  defp try_brand_fallback(original_brand, model_year, vehicle_type, fipe_code, _model_name, veh) do
+    if blank?(fipe_code) do
+      :no_fallback
+    else
+      case Vehicle.brand_list(vehicle_type) do
+        {:ok, resp} ->
+          all_brands =
+            (resp["data"] || [])
+            |> Enum.map(fn b -> b["value"] end)
+            |> Enum.filter(&is_binary/1)
+            |> Enum.reject(fn b -> normalize_brand(b) == normalize_brand(original_brand) end)
+
+          # Priorizar marcas comuns (mais prováveis)
+          {priority, rest} = Enum.split_with(all_brands, &common_brand?/1)
+          candidates = priority ++ Enum.take(rest, 5)
+
+          Logger.info(
+            "[Segfy Renewal] brand-fallback tentando #{length(candidates)} marcas " <>
+              "para fipe_code=#{inspect(fipe_code)} (original: #{inspect(original_brand)})"
+          )
+
+          Enum.reduce_while(candidates, :no_fallback, fn brand, _acc ->
+            # Só tenta se model-list retornar modelos com nosso fipe_code
+            params = %{"brand" => brand, "model_year" => model_year, "vehicle_type" => vehicle_type}
+
+            case Vehicle.model_list(params) do
+              {:ok, resp} ->
+                models = model_list_extract_models(resp)
+
+                match =
+                  if models != [] do
+                    find_fipe_model(models, fipe_code, nil, nil)
+                  end
+
+                if match do
+                  Logger.info(
+                    "[Segfy Renewal] brand-fallback MATCH! marca=#{inspect(brand)} " <>
+                      "(original: #{inspect(original_brand)}) fipe_code=#{inspect(fipe_code)}"
+                  )
+
+                  veh2 = apply_model_list_match_to_vehicle(veh, match)
+                  veh2 = Map.put(veh2, "brand", brand)
+
+                  {:halt, {:ok, veh2}}
+                else
+                  {:cont, :no_fallback}
+                end
+
+              {:error, _} ->
+                {:cont, :no_fallback}
+            end
+          end)
+
+        {:error, reason} ->
+          Logger.warning("[Segfy Renewal] brand-list falhou no fallback: #{inspect(reason)}")
+          :no_fallback
+      end
+    end
+  end
+
+  @common_brands MapSet.new([
+    "gm - chevrolet", "toyota", "fiat", "ford", "honda", "hyundai", "vw - volkswagen",
+    "nissan", "renault", "jeep", "kia motors", "mitsubishi", "peugeot", "citroen",
+    "bmw", "mercedes-benz", "audi", "volvo", "land rover", "caoa chery", "caoa chery/chery",
+    "byd", "gwm", "great wall", "subaru", "suzuki", "jaguar", "ram"
+  ])
+
+  defp common_brand?(name), do: MapSet.member?(@common_brands, normalize_brand(name))
+  defp normalize_brand(b), do: b |> String.downcase() |> String.trim()
 
   @doc false
   # Retorno para chamadas legadas que só precisam de fipe + modelo após enriquecimento.
