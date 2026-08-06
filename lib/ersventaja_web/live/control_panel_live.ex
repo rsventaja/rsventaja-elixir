@@ -925,13 +925,37 @@ defmodule ErsventajaWeb.ControlPanelLive do
   @impl true
   def handle_event("block_sender", %{"phone" => phone}, socket) do
     Atendimento.block_sender(phone, "control_panel")
-    {:noreply, socket |> put_flash(:success, "Número #{phone} bloqueado.")}
+
+    # Recarrega o atendimento selecionado pra refletir o toggle
+    selected =
+      if socket.assigns.selected_atendimento do
+        Atendimento.get_atendimento_with_relations(socket.assigns.selected_atendimento.id)
+      end
+
+    # Atualiza lista de atendimentos
+    atendimentos = Atendimento.list_atendimentos(socket.assigns.atendimento_filter)
+
+    {:noreply,
+     socket
+     |> assign(selected_atendimento: selected, atendimentos: atendimentos)
+     |> put_flash(:success, "Número #{phone} bloqueado.")}
   end
 
   @impl true
   def handle_event("unblock_sender", %{"phone" => phone}, socket) do
     Atendimento.unblock_sender(phone)
-    {:noreply, socket |> put_flash(:success, "Número #{phone} desbloqueado.")}
+
+    selected =
+      if socket.assigns.selected_atendimento do
+        Atendimento.get_atendimento_with_relations(socket.assigns.selected_atendimento.id)
+      end
+
+    atendimentos = Atendimento.list_atendimentos(socket.assigns.atendimento_filter)
+
+    {:noreply,
+     socket
+     |> assign(selected_atendimento: selected, atendimentos: atendimentos)
+     |> put_flash(:success, "Número #{phone} desbloqueado.")}
   end
 
   @impl true
@@ -3452,16 +3476,25 @@ defmodule ErsventajaWeb.ControlPanelLive do
                     <strong style="color: #64748b; font-size: 12px;">CPF/CNPJ</strong>
                     <br/><span style="color: #374151;"><%= @selected_atendimento.cpf_cnpj %></span>
                   </div>
-                  <div style="min-width: 150px;">
+                  <div style="min-width: 180px;">
                     <strong style="color: #64748b; font-size: 12px;">WhatsApp</strong>
                     <br/>
                     <span style="color: #374151; font-size: 13px;"><%= @selected_atendimento.whatsapp_phone %></span>
-                    <button phx-click="block_sender" phx-value-phone={@selected_atendimento.whatsapp_phone}
-                            style="margin-left: 6px; background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5;
-                                   border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;"
-                            title="Bloquear este número">
-                      🚫 Bloquear
-                    </button>
+                    <%= if Atendimento.is_blocked?(@selected_atendimento.whatsapp_phone) do %>
+                      <button phx-click="unblock_sender" phx-value-phone={@selected_atendimento.whatsapp_phone}
+                              style="margin-left: 6px; background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7;
+                                     border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;"
+                              title="Desbloquear este número">
+                        ✅ Desbloquear
+                      </button>
+                    <% else %>
+                      <button phx-click="block_sender" phx-value-phone={@selected_atendimento.whatsapp_phone}
+                              style="margin-left: 6px; background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5;
+                                     border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;"
+                              title="Bloquear este número">
+                        🚫 Bloquear
+                      </button>
+                    <% end %>
                   </div>
                   <div style="min-width: 120px;">
                     <strong style="color: #64748b; font-size: 12px;">Categoria</strong>

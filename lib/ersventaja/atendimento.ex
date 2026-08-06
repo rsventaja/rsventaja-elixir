@@ -293,13 +293,24 @@ defmodule Ersventaja.Atendimento do
   def block_sender(phone, blocked_by \\ nil) do
     now = NaiveDateTime.utc_now()
 
-    Repo.insert_all(
-      "blocked_senders",
-      [
-        %{phone: phone, blocked_by: blocked_by, inserted_at: now, updated_at: now}
-      ],
-      on_conflict: :nothing
-    )
+    result =
+      Repo.insert_all(
+        "blocked_senders",
+        [
+          %{phone: phone, blocked_by: blocked_by, inserted_at: now, updated_at: now}
+        ],
+        on_conflict: :nothing
+      )
+
+    # Encerra atendimentos ativos deste número sem notificar WhatsApp
+    from(a in Atendimento, where: a.whatsapp_phone == ^phone, where: a.status == "active")
+    |> Repo.all()
+    |> Enum.each(fn att ->
+      end_atendimento(att, "blocked")
+      Logger.info("[Atendimento] ##{att.id} ended because sender was blocked: #{phone}")
+    end)
+
+    result
   end
 
   @doc """
