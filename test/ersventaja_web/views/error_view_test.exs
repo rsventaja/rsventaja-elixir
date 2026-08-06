@@ -9,6 +9,7 @@ defmodule ErsventajaWeb.ErrorViewTest do
   end
 
   test "renders 500.html" do
-    assert render_to_string(ErsventajaWeb.ErrorView, "500", "html", assigns: []) =~ "Internal Server Error"
+    assert render_to_string(ErsventajaWeb.ErrorView, "500", "html", assigns: []) =~
+             "Internal Server Error"
   end
 end

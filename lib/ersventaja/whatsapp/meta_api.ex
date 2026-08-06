@@ -48,9 +48,10 @@ defmodule Ersventaja.Whatsapp.MetaApi do
       type: "button",
       body: %{text: body_text},
       action: %{
-        buttons: Enum.map(buttons, fn %{id: id, title: title} ->
-          %{type: "reply", reply: %{id: id, title: title}}
-        end)
+        buttons:
+          Enum.map(buttons, fn %{id: id, title: title} ->
+            %{type: "reply", reply: %{id: id, title: title}}
+          end)
       }
     }
 
@@ -90,7 +91,14 @@ defmodule Ersventaja.Whatsapp.MetaApi do
   - Row title: max 24 chars
   - Row description: max 72 chars (optional)
   """
-  def send_interactive_list(phone_number_id, to_wa_id, body_text, button_text, sections, opts \\ []) do
+  def send_interactive_list(
+        phone_number_id,
+        to_wa_id,
+        body_text,
+        button_text,
+        sections,
+        opts \\ []
+      ) do
     header_text = Keyword.get(opts, :header)
     footer_text = Keyword.get(opts, :footer)
 
@@ -106,6 +114,7 @@ defmodule Ersventaja.Whatsapp.MetaApi do
               rows:
                 Enum.map(rows, fn row ->
                   row_map = %{id: row.id, title: row.title}
+
                   if Map.has_key?(row, :description),
                     do: Map.put(row_map, :description, row.description),
                     else: row_map
@@ -237,6 +246,7 @@ defmodule Ersventaja.Whatsapp.MetaApi do
 
   defp get_access_token do
     token = Application.get_env(:ersventaja, :whatsapp)[:access_token]
+
     if is_nil(token) or token == "" do
       Logger.warning("[WhatsApp] WHATSAPP_ACCESS_TOKEN not set")
       nil

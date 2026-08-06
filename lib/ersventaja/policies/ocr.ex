@@ -49,20 +49,14 @@ defmodule Ersventaja.Policies.OCR do
     file_path_str = to_string(file_path)
 
     if File.exists?(file_path_str) do
-      try do
-        result =
-          with {:ok, text} <- extract_text(file_path_str),
-               {:ok, info} <- parse_policy_info(text, insurers, insurance_types) do
-            {:ok, info}
-          else
-            {:error, _reason} = error ->
-              error
-          end
+      # Check if direct vision mode is enabled via env var
+      use_direct_vision? =
+        System.get_env("OCR_USE_DIRECT_VISION") in ["true", "1", "yes"]
 
-        result
-      rescue
-        e ->
-          {:error, {:ocr_error, Exception.message(e)}}
+      if use_direct_vision? do
+        extract_policy_info_direct(file_path_str, insurers, insurance_types)
+      else
+        extract_policy_info_via_text(file_path_str, insurers, insurance_types)
       end
     else
       {:error, {:ocr_error, "File not found: #{file_path_str}"}}
@@ -70,6 +64,56 @@ defmodule Ersventaja.Policies.OCR do
   end
 
   def extract_policy_info(_, _, _), do: {:error, :invalid_input}
+
+  defp extract_policy_info_via_text(file_path_str, insurers, insurance_types) do
+    try do
+      result =
+        with {:ok, text} <- extract_text(file_path_str),
+             {:ok, info} <- parse_policy_info(text, insurers, insurance_types) do
+          {:ok, info}
+        else
+          {:error, _reason} = error ->
+            error
+        end
+
+      result
+    rescue
+      e ->
+        {:error, {:ocr_error, Exception.message(e)}}
+    end
+  end
+
+  @doc """
+  Extracts policy information directly from PDF page images using GPT-4o vision,
+  bypassing Tesseract OCR entirely.
+
+  Converts the PDF to images and sends them directly to GPT-4o's vision model.
+  """
+  def extract_policy_info_direct(file_path, insurers \\ [], insurance_types \\ [])
+
+  def extract_policy_info_direct(file_path, insurers, insurance_types)
+      when is_binary(file_path) do
+    require Logger
+    Logger.info("[OCR DIRECT VISION] Starting direct GPT-4o vision extraction for: #{file_path}")
+
+    with {:ok, image_paths} <- convert_pdf_to_image(file_path),
+         {:ok, info} <-
+           GPTClient.extract_policy_info_from_images(image_paths, insurers, insurance_types) do
+      # Clean up image files
+      Enum.each(image_paths, &File.rm/1)
+      Logger.info("[OCR DIRECT VISION] Extraction complete")
+      {:ok, info}
+    else
+      {:error, reason} ->
+        Logger.error("[OCR DIRECT VISION] Failed: #{inspect(reason)}")
+        {:error, {:ocr_error, "Direct vision extraction failed: #{inspect(reason)}"}}
+    end
+  rescue
+    e ->
+      {:error, {:ocr_error, Exception.message(e)}}
+  end
+
+  def extract_policy_info_direct(_, _, _), do: {:error, :invalid_input}
 
   @doc """
   Apenas texto bruto do PDF (`pdftotext` → fallback Tesseract). **Sem** parsing de campos.

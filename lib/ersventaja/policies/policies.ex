@@ -300,7 +300,10 @@ defmodule Ersventaja.Policies do
   """
   def get_active_policies_by_cpf_cnpj(cpf_or_cnpj) when is_binary(cpf_or_cnpj) do
     digits = normalize_cpf_cnpj(cpf_or_cnpj)
-    if digits == "" or byte_size(digits) < 11, do: [], else: do_get_active_policies_by_cpf_cnpj(digits)
+
+    if digits == "" or byte_size(digits) < 11,
+      do: [],
+      else: do_get_active_policies_by_cpf_cnpj(digits)
   end
 
   def get_active_policies_by_cpf_cnpj(_), do: []

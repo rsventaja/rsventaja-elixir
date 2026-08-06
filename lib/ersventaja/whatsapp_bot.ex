@@ -61,12 +61,20 @@ defmodule Ersventaja.WhatsappBot do
   # Message routing — dispatches by message type
   # ---------------------------------------------------------------------------
 
-  defp handle_message(phone_number_id, %{"from" => from, "type" => "text", "text" => %{"body" => body}}) do
+  defp handle_message(phone_number_id, %{
+         "from" => from,
+         "type" => "text",
+         "text" => %{"body" => body}
+       }) do
     text = String.trim(String.downcase(body))
     handle_text_message(phone_number_id, from, text)
   end
 
-  defp handle_message(phone_number_id, %{"from" => from, "type" => "interactive", "interactive" => interactive}) do
+  defp handle_message(phone_number_id, %{
+         "from" => from,
+         "type" => "interactive",
+         "interactive" => interactive
+       }) do
     handle_interactive_message(phone_number_id, from, interactive)
   end
 
@@ -102,7 +110,18 @@ defmodule Ersventaja.WhatsappBot do
         check_consent_then_policies(phone_number_id, from, text)
 
       # Menu / help keywords — send interactive menu
-      text in ["menu", "oi", "ola", "olá", "help", "ajuda", "inicio", "início", "comecar", "começar"] ->
+      text in [
+        "menu",
+        "oi",
+        "ola",
+        "olá",
+        "help",
+        "ajuda",
+        "inicio",
+        "início",
+        "comecar",
+        "começar"
+      ] ->
         send_main_menu(phone_number_id, from)
 
       # Old FAQ keyword fallbacks — still respond with relevant info
@@ -128,7 +147,10 @@ defmodule Ersventaja.WhatsappBot do
   # Interactive message handlers (button_reply + list_reply)
   # ---------------------------------------------------------------------------
 
-  defp handle_interactive_message(phone_number_id, from, %{"type" => "button_reply", "button_reply" => %{"id" => btn_id}}) do
+  defp handle_interactive_message(phone_number_id, from, %{
+         "type" => "button_reply",
+         "button_reply" => %{"id" => btn_id}
+       }) do
     case btn_id do
       @btn_id_consent_sim ->
         give_consent_and_send_policies(phone_number_id, from)
@@ -141,7 +163,10 @@ defmodule Ersventaja.WhatsappBot do
     end
   end
 
-  defp handle_interactive_message(phone_number_id, from, %{"type" => "list_reply", "list_reply" => %{"id" => list_id}}) do
+  defp handle_interactive_message(phone_number_id, from, %{
+         "type" => "list_reply",
+         "list_reply" => %{"id" => list_id}
+       }) do
     case list_id do
       @list_id_apolice ->
         ask_for_cpf(phone_number_id, from)
@@ -163,7 +188,8 @@ defmodule Ersventaja.WhatsappBot do
     end
   end
 
-  defp handle_interactive_message(phone_number_id, from, _), do: send_main_menu(phone_number_id, from)
+  defp handle_interactive_message(phone_number_id, from, _),
+    do: send_main_menu(phone_number_id, from)
 
   # ---------------------------------------------------------------------------
   # Menu (interactive list message)
@@ -178,7 +204,11 @@ defmodule Ersventaja.WhatsappBot do
           %{id: @list_id_renovacao, title: "🔄 Renovação", description: "Saiba como renovar"},
           %{id: @list_id_contato, title: "📞 Contato", description: "Fale com a corretora"},
           %{id: @list_id_produtos, title: "🛡️ Produtos", description: "Conheça nossos seguros"},
-          %{id: @list_id_revogar, title: "🔒 Revogar LGPD", description: "Revogar autorização de dados"}
+          %{
+            id: @list_id_revogar,
+            title: "🔒 Revogar LGPD",
+            description: "Revogar autorização de dados"
+          }
         ]
       }
     ]
@@ -310,6 +340,7 @@ defmodule Ersventaja.WhatsappBot do
 
           {:error, _reason} ->
             Logger.warning("[WhatsApp] Media upload failed for policy #{policy.id}")
+
             MetaApi.send_text(
               phone_number_id,
               from,
@@ -320,6 +351,7 @@ defmodule Ersventaja.WhatsappBot do
 
       {:error, _reason} ->
         Logger.warning("[WhatsApp] S3 download failed for policy #{policy.id}")
+
         MetaApi.send_text(
           phone_number_id,
           from,
@@ -372,6 +404,7 @@ defmodule Ersventaja.WhatsappBot do
         case Lgpd.revoke_consent(cpf, from, "Solicitado pelo titular via WhatsApp") do
           {:ok, _} ->
             clear_pending_consent(from)
+
             MetaApi.send_text(
               phone_number_id,
               from,
@@ -403,6 +436,7 @@ defmodule Ersventaja.WhatsappBot do
 
   defp handle_consent_refused(phone_number_id, from) do
     clear_pending_consent(from)
+
     MetaApi.send_text(
       phone_number_id,
       from,
@@ -480,7 +514,10 @@ defmodule Ersventaja.WhatsappBot do
   end
 
   defp set_pending_consent(from, cpf_cnpj) do
-    :ets.insert(@pending_consent_table, {from, %{cpf_cnpj: cpf_cnpj, timestamp: DateTime.utc_now()}})
+    :ets.insert(
+      @pending_consent_table,
+      {from, %{cpf_cnpj: cpf_cnpj, timestamp: DateTime.utc_now()}}
+    )
   end
 
   defp clear_pending_consent(from) do

@@ -128,13 +128,17 @@ defmodule Ersventaja.Lgpd do
     # unique-constraint violation.
     Repo.insert(
       Consent.changeset(%Consent{}, attrs),
-      on_conflict: [set: [consented_at: attrs.consented_at,
-                          consent_text_shown: attrs.consent_text_shown,
-                          policy_version: attrs.policy_version,
-                          source: attrs.source,
-                          revoked_at: nil,
-                          revocation_reason: nil,
-                          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]],
+      on_conflict: [
+        set: [
+          consented_at: attrs.consented_at,
+          consent_text_shown: attrs.consent_text_shown,
+          policy_version: attrs.policy_version,
+          source: attrs.source,
+          revoked_at: nil,
+          revocation_reason: nil,
+          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        ]
+      ],
       conflict_target: [:cpf_cnpj, :whatsapp_phone]
     )
   end

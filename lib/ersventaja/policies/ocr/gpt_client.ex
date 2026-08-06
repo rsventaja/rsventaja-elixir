@@ -64,6 +64,39 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
 
   def extract_policy_info(_, _, _), do: {:error, "Invalid text input"}
 
+  @doc """
+  Extracts structured policy information directly from PDF page images using GPT-4o vision.
+
+  Bypasses Tesseract OCR entirely — sends the images directly to GPT-4o's vision model
+  for end-to-end extraction.
+
+  ## Parameters
+  - `image_paths`: List of file paths to PNG/JPEG images (PDF pages converted to images)
+  - `insurers`: List of available insurers with id and name
+  - `insurance_types`: List of available insurance types with id and name
+
+  ## Returns
+  - `{:ok, map}` with extracted policy information
+  - `{:error, reason}` on failure
+  """
+  def extract_policy_info_from_images(image_paths, insurers \\ [], insurance_types \\ [])
+
+  def extract_policy_info_from_images(image_paths, insurers, insurance_types)
+      when is_list(image_paths) and length(image_paths) > 0 do
+    api_key = get_api_key() || ""
+    using_local_llm? = System.get_env("APP_LLM_BASE_URL") not in [nil, ""]
+
+    if api_key == "" and not using_local_llm? do
+      {:error, "OPENAI_API_KEY not found (set APP_LLM_BASE_URL for local LLM)"}
+    else
+      # Use gpt-4o for direct vision (falls back to OPENAI_VISION_MODEL or OPENAI_MODEL env vars)
+      model = System.get_env("OPENAI_VISION_MODEL") || System.get_env("OPENAI_MODEL") || "gpt-4o"
+      call_gpt_vision_api(image_paths, api_key, model, insurers, insurance_types)
+    end
+  end
+
+  def extract_policy_info_from_images(_, _, _), do: {:error, "Invalid image paths input"}
+
   defp get_api_key do
     System.get_env("OPENAI_API_KEY")
   end
@@ -115,6 +148,122 @@ defmodule Ersventaja.Policies.OCR.GPTClient do
       {:error, reason} ->
         {:error, "HTTP request failed: #{inspect(reason)}"}
     end
+  end
+
+  # Sends images directly to GPT-4o vision API (bypasses Tesseract)
+  defp call_gpt_vision_api(image_paths, api_key, model, insurers, insurance_types) do
+    require Logger
+
+    # Build vision messages with base64-encoded images
+    vision_messages = build_vision_messages(image_paths, insurers, insurance_types)
+
+    request_body = %{
+      model: model,
+      messages: vision_messages,
+      response_format: %{type: "json_object"},
+      temperature: 0.1,
+      max_tokens: 4096
+    }
+
+    body = Jason.encode!(request_body)
+
+    headers = [
+      {"Authorization", "Bearer #{api_key}"},
+      {"Content-Type", "application/json"}
+    ]
+
+    # Longer timeouts for vision API (image payloads are larger)
+    hackney_options = [
+      recv_timeout: 120_000,
+      connect_timeout: 15_000,
+      timeout: 120_000
+    ]
+
+    Logger.info(
+      "[GPT VISION] Sending #{length(image_paths)} images directly to GPT-4o vision API"
+    )
+
+    case :hackney.post(api_url(), headers, body, hackney_options) do
+      {:ok, status_code, _headers, client_ref} when status_code in [200, 201] ->
+        {:ok, response_body} = :hackney.body(client_ref)
+        Logger.info("[GPT VISION] API call successful")
+        parse_response(response_body)
+
+      {:ok, status_code, _headers, client_ref} ->
+        {:ok, error_body} = :hackney.body(client_ref)
+        Logger.error("[GPT VISION] API error (status #{status_code}): #{error_body}")
+        {:error, "OpenAI API error (status #{status_code}): #{error_body}"}
+
+      {:error, reason} ->
+        Logger.error("[GPT VISION] HTTP request failed: #{inspect(reason)}")
+        {:error, "HTTP request failed: #{inspect(reason)}"}
+    end
+  end
+
+  # Builds the messages array for vision API: system message + user message with images
+  defp build_vision_messages(image_paths, insurers, insurance_types) do
+    # Read and encode all images as base64 data URIs
+    image_contents =
+      image_paths
+      |> Enum.with_index(1)
+      |> Enum.map(fn {path, _page_num} ->
+        mime_type = mime_type_for_path(path)
+        base64_data = Base.encode64(File.read!(path))
+
+        %{
+          type: "image_url",
+          image_url: %{
+            url: "data:#{mime_type};base64,#{base64_data}",
+            detail: "high"
+          }
+        }
+      end)
+
+    user_text = vision_user_prompt(image_paths)
+
+    user_content =
+      [
+        %{type: "text", text: user_text}
+      ] ++ image_contents
+
+    [
+      %{
+        role: "system",
+        content: system_prompt(insurers, insurance_types)
+      },
+      %{
+        role: "user",
+        content: user_content
+      }
+    ]
+  end
+
+  defp mime_type_for_path(path) do
+    cond do
+      String.ends_with?(path, ".png") -> "image/png"
+      String.ends_with?(path, ".jpg") -> "image/jpeg"
+      String.ends_with?(path, ".jpeg") -> "image/jpeg"
+      true -> "image/png"
+    end
+  end
+
+  # Prompt for the vision model — instructs it to read document pages directly
+  defp vision_user_prompt(image_paths) do
+    page_list =
+      image_paths
+      |> Enum.with_index(1)
+      |> Enum.map(fn {_path, num} -> "  - Página #{num}" end)
+      |> Enum.join("\n")
+
+    """
+    Analise as imagens abaixo, que são páginas de um documento de apólice de seguro brasileiro (#{length(image_paths)} páginas no total):
+
+    #{page_list}
+
+    Extraia as informações estruturadas conforme as instruções do sistema e retorne como um objeto JSON.
+
+    IMPORTANTE: As imagens são digitalizações de documentos. Leia atentamente cada página, incluindo cabeçalhos, rodapés, tabelas e texto em letras pequenas. Se houver inconsistências entre páginas, priorize as informações mais específicas (ex: tabela de coberturas sobre texto introdutório).
+    """
   end
 
   defp system_prompt(insurers, insurance_types) do

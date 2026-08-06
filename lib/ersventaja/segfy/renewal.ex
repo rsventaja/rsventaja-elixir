@@ -671,7 +671,11 @@ defmodule Ersventaja.Segfy.Renewal do
 
           Enum.reduce_while(candidates, :no_fallback, fn brand, _acc ->
             # Só tenta se model-list retornar modelos com nosso fipe_code
-            params = %{"brand" => brand, "model_year" => model_year, "vehicle_type" => vehicle_type}
+            params = %{
+              "brand" => brand,
+              "model_year" => model_year,
+              "vehicle_type" => vehicle_type
+            }
 
             case Vehicle.model_list(params) do
               {:ok, resp} ->
@@ -709,11 +713,35 @@ defmodule Ersventaja.Segfy.Renewal do
   end
 
   @common_brands MapSet.new([
-    "gm - chevrolet", "toyota", "fiat", "ford", "honda", "hyundai", "vw - volkswagen",
-    "nissan", "renault", "jeep", "kia motors", "mitsubishi", "peugeot", "citroen",
-    "bmw", "mercedes-benz", "audi", "volvo", "land rover", "caoa chery", "caoa chery/chery",
-    "byd", "gwm", "great wall", "subaru", "suzuki", "jaguar", "ram"
-  ])
+                   "gm - chevrolet",
+                   "toyota",
+                   "fiat",
+                   "ford",
+                   "honda",
+                   "hyundai",
+                   "vw - volkswagen",
+                   "nissan",
+                   "renault",
+                   "jeep",
+                   "kia motors",
+                   "mitsubishi",
+                   "peugeot",
+                   "citroen",
+                   "bmw",
+                   "mercedes-benz",
+                   "audi",
+                   "volvo",
+                   "land rover",
+                   "caoa chery",
+                   "caoa chery/chery",
+                   "byd",
+                   "gwm",
+                   "great wall",
+                   "subaru",
+                   "suzuki",
+                   "jaguar",
+                   "ram"
+                 ])
 
   defp common_brand?(name), do: MapSet.member?(@common_brands, normalize_brand(name))
   defp normalize_brand(b), do: b |> String.downcase() |> String.trim()
