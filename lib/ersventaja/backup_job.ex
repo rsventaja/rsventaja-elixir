@@ -16,7 +16,9 @@ defmodule Ersventaja.BackupJob do
 
   def handle_info(:work, state) do
     file_content =
-      Repo.all(Policy)
+      Policy
+      |> Repo.all()
+      |> Repo.preload(:customer)
       |> Enum.map(&generate_row(&1))
       |> Enum.join("\n")
 
@@ -36,15 +38,20 @@ defmodule Ersventaja.BackupJob do
 
   defp generate_row(%Policy{
          calculated: calculated,
-         customer_name: customer_name,
          detail: detail,
          end_date: end_date,
          id: id,
          insurer_id: insurer_id,
          start_date: start_date
-       }),
-       do:
-         "#{id};#{customer_name};#{detail};#{insurer_id};#{start_date};#{end_date};#{calculated};#{id}"
+       } = policy) do
+    customer_name =
+      case policy.customer do
+        %{name: name} -> name
+        _ -> ""
+      end
+
+    "#{id};#{customer_name};#{detail};#{insurer_id};#{start_date};#{end_date};#{calculated};#{id}"
+  end
 
   defp schedule_work do
     Process.send_after(self(), :work, 24 * 60 * 60 * 1000)

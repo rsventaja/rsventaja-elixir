@@ -3,26 +3,23 @@ defmodule Ersventaja.Policies.Models.Policy do
   import Ecto.Changeset
 
   @derive {Jason.Encoder,
-           only: [:id, :customer_name, :detail, :start_date, :end_date, :calculated]}
+           only: [:id, :detail, :start_date, :end_date, :calculated, :customer_id]}
 
   alias Ersventaja.Policies.Models.Insurer
   alias Ersventaja.Policies.Models.InsuranceType
+  alias Ersventaja.Customers.Models.Customer
 
   @fields ~w(
-    customer_name
     detail
     start_date
     end_date
     calculated
-    customer_cpf_or_cnpj
-    customer_phone
-    customer_email
     license_plate
     insurance_type_id
+    customer_id
   )a
 
   @required_fields ~w(
-    customer_name
     detail
     start_date
     end_date
@@ -30,18 +27,15 @@ defmodule Ersventaja.Policies.Models.Policy do
   )a
 
   schema "policies" do
-    field(:customer_name, :string)
+    belongs_to(:insurer, Insurer)
+    belongs_to(:insurance_type, InsuranceType)
+    belongs_to(:customer, Customer)
+
     field(:detail, :string)
     field(:start_date, :date)
     field(:end_date, :date)
     field(:calculated, :boolean)
-    field(:customer_cpf_or_cnpj, :string)
-    field(:customer_phone, :string)
-    field(:customer_email, :string)
     field(:license_plate, :string)
-
-    belongs_to(:insurer, Insurer)
-    belongs_to(:insurance_type, InsuranceType)
 
     timestamps()
   end

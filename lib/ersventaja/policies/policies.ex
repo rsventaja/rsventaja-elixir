@@ -1,5 +1,6 @@
 defmodule Ersventaja.Policies do
   alias Ersventaja.Repo
+  alias Ersventaja.Customers
   alias Ersventaja.Policies.Adapters.RequestAdapter
   alias Ersventaja.Policies.Adapters.ResponseAdapter
   alias Ersventaja.Policies.Models.InsuranceType
@@ -60,17 +61,25 @@ defmodule Ersventaja.Policies do
           :error -> request.encoded_file
         end
 
+      # Find or create customer by CPF/CNPJ
+      customer_id =
+        case Customers.find_or_create_by_cpf_cnpj(request.customer_cpf_or_cnpj, %{
+               name: request.name,
+               phone: request.customer_phone,
+               email: request.customer_email
+             }) do
+          {:ok, customer} when not is_nil(customer) -> customer.id
+          _ -> nil
+        end
+
       policy =
         Repo.insert!(%Policy{
-          customer_name: request.name,
+          customer_id: customer_id,
           detail: request.detail,
           start_date: request.start_date,
           end_date: request.end_date,
           insurer_id: request.insurer_id,
           calculated: false,
-          customer_cpf_or_cnpj: request.customer_cpf_or_cnpj,
-          customer_phone: request.customer_phone,
-          customer_email: request.customer_email,
           license_plate: request.license_plate,
           insurance_type_id: request.insurance_type_id
         })
@@ -117,9 +126,10 @@ defmodule Ersventaja.Policies do
       true ->
         query =
           from(p in Policy,
+            left_join: c in assoc(p, :customer),
             where:
               p.start_date <= ^today and p.end_date > ^today and
-                (like(fragment("lower(?)", p.customer_name), ^like) or
+                (like(fragment("lower(?)", c.name), ^like) or
                    like(fragment("lower(?)", p.detail), ^like)),
             order_by: p.end_date
           )
@@ -129,8 +139,9 @@ defmodule Ersventaja.Policies do
       _ ->
         query =
           from(p in Policy,
+            left_join: c in assoc(p, :customer),
             where:
-              like(fragment("lower(?)", p.customer_name), ^like) or
+              like(fragment("lower(?)", c.name), ^like) or
                 like(fragment("lower(?)", p.detail), ^like),
             order_by: p.end_date
           )
@@ -152,16 +163,19 @@ defmodule Ersventaja.Policies do
 
       policy ->
         policy
-        |> Repo.preload([:insurer, :insurance_type])
+        |> Repo.preload([:insurer, :insurance_type, :customer])
         |> then(fn p -> Map.merge(p, %{file_name: get_file_name(p.id)}) end)
         |> policy_to_response()
     end
   end
 
   defp policy_to_response(policy) do
+    customer = Map.get(policy, :customer)
+
     %{
       id: policy.id,
-      customer_name: policy.customer_name,
+      customer_id: policy.customer_id,
+      customer_name: customer_name_from(customer),
       insurer: if(policy.insurer, do: policy.insurer.name, else: nil),
       insurer_id: policy.insurer_id,
       insurance_type: if(policy.insurance_type, do: policy.insurance_type.name, else: nil),
@@ -171,17 +185,29 @@ defmodule Ersventaja.Policies do
       end_date: policy.end_date,
       calculated: policy.calculated,
       file_name: policy.file_name,
-      customer_cpf_or_cnpj: policy.customer_cpf_or_cnpj,
-      customer_phone: policy.customer_phone,
-      customer_email: policy.customer_email,
+      customer_cpf_or_cnpj: customer_cpf_from(customer),
+      customer_phone: customer_phone_from(customer),
+      customer_email: customer_email_from(customer),
       license_plate: policy.license_plate
     }
   end
 
+  defp customer_name_from(%{name: name}), do: name
+  defp customer_name_from(_), do: nil
+
+  defp customer_cpf_from(%{cpf_cnpj: cpf_cnpj}), do: cpf_cnpj
+  defp customer_cpf_from(_), do: nil
+
+  defp customer_phone_from(%{phone: phone}), do: phone
+  defp customer_phone_from(_), do: nil
+
+  defp customer_email_from(%{email: email}), do: email
+  defp customer_email_from(_), do: nil
+
   def get_policies_without_cpf(limit \\ 100) do
     query =
       from(p in Policy,
-        where: is_nil(p.customer_cpf_or_cnpj) or p.customer_cpf_or_cnpj == "",
+        where: is_nil(p.customer_id),
         order_by: [asc: p.id],
         limit: ^limit
       )
@@ -194,43 +220,78 @@ defmodule Ersventaja.Policies do
   def count_policies_without_cpf() do
     query =
       from(p in Policy,
-        where: is_nil(p.customer_cpf_or_cnpj) or p.customer_cpf_or_cnpj == "",
+        where: is_nil(p.customer_id),
         select: count(p.id)
       )
 
     Repo.one(query)
   end
 
-  def update_policy_customer_info(id, attrs) when is_integer(id) do
-    case Repo.get(Policy, id) do
-      nil ->
-        {:error, :not_found}
-
-      policy ->
-        policy
-        |> change(attrs)
-        |> Repo.update()
-    end
-  end
-
   def update_policy(id, attrs) when is_integer(id) do
-    case Repo.get(Policy, id) do
+    policy =
+      Policy
+      |> Repo.get(id)
+      |> Repo.preload(:customer)
+
+    case policy do
       nil ->
         {:error, :not_found}
 
       policy ->
+        # ── Update customer record ──────────────────────────────────────────
+        new_cpf = Map.get(attrs, "customer_cpf_or_cnpj")
+        new_name = Map.get(attrs, "customer_name")
+        new_phone = Map.get(attrs, "customer_phone")
+        new_email = Map.get(attrs, "customer_email")
+
+        # Normalize CPF to check if it actually changed
+        current_cpf_digits = normalize_cpf_cnpj(policy.customer && policy.customer.cpf_cnpj)
+        new_cpf_digits = normalize_cpf_cnpj(new_cpf)
+
+        customer_id =
+          cond do
+            # CPF removed (cleared) → unlink customer
+            is_nil(new_cpf) or new_cpf == "" ->
+              nil
+
+            # CPF changed → find or create new customer
+            new_cpf_digits != "" and new_cpf_digits != current_cpf_digits ->
+              case Customers.find_or_create_by_cpf_cnpj(new_cpf, %{
+                     name: new_name,
+                     phone: new_phone,
+                     email: new_email
+                   }) do
+                {:ok, customer} when not is_nil(customer) -> customer.id
+                _ -> policy.customer_id
+              end
+
+            # Same CPF, new customer data → update existing customer
+            policy.customer && (new_name || new_phone || new_email) ->
+              customer_attrs =
+                %{}
+                |> maybe_put(:name, new_name)
+                |> maybe_put(:phone, new_phone)
+                |> maybe_put(:email, new_email)
+
+              case Customers.update_customer(policy.customer, customer_attrs) do
+                {:ok, _customer} -> policy.customer_id
+                _ -> policy.customer_id
+              end
+
+            # No changes to customer
+            true ->
+              policy.customer_id
+          end
+
+        # ── Update policy fields ────────────────────────────────────────────
         changeset =
           policy
           |> change(%{
-            customer_name: Map.get(attrs, "customer_name", policy.customer_name),
+            customer_id: customer_id,
             detail: Map.get(attrs, "detail", policy.detail),
             start_date: parse_date(Map.get(attrs, "start_date")),
             end_date: parse_date(Map.get(attrs, "end_date")),
             insurer_id: parse_integer(Map.get(attrs, "insurer_id")),
-            customer_cpf_or_cnpj:
-              Map.get(attrs, "customer_cpf_or_cnpj", policy.customer_cpf_or_cnpj),
-            customer_phone: Map.get(attrs, "customer_phone", policy.customer_phone),
-            customer_email: Map.get(attrs, "customer_email", policy.customer_email),
             license_plate: Map.get(attrs, "license_plate", policy.license_plate),
             insurance_type_id:
               parse_integer(Map.get(attrs, "insurance_type_id")) || policy.insurance_type_id
@@ -239,7 +300,7 @@ defmodule Ersventaja.Policies do
         case Repo.update(changeset) do
           {:ok, updated_policy} ->
             updated_policy
-            |> Repo.preload([:insurer, :insurance_type])
+            |> Repo.preload([:insurer, :insurance_type, :customer])
             |> then(fn p -> Map.merge(p, %{file_name: get_file_name(p.id)}) end)
             |> policy_to_response()
             |> then(&{:ok, &1})
@@ -249,6 +310,10 @@ defmodule Ersventaja.Policies do
         end
     end
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp parse_date(nil), do: nil
   defp parse_date(""), do: nil
@@ -309,18 +374,18 @@ defmodule Ersventaja.Policies do
   def get_active_policies_by_cpf_cnpj(_), do: []
 
   defp do_get_policies_by_cpf_cnpj(digits) do
-    # Compare normalized: DB may store "123.456.789-00", we search by digits only
     query =
       from(p in Policy,
+        join: c in assoc(p, :customer),
         where:
-          not is_nil(p.customer_cpf_or_cnpj) and p.customer_cpf_or_cnpj != "" and
-            fragment("regexp_replace(?, '[^0-9]', '', 'g')", p.customer_cpf_or_cnpj) == ^digits,
+          not is_nil(c.cpf_cnpj) and c.cpf_cnpj != "" and
+            fragment("regexp_replace(?, '[^0-9]', '', 'g')", c.cpf_cnpj) == ^digits,
         order_by: [desc: p.end_date]
       )
 
     query
     |> Repo.all()
-    |> Repo.preload([:insurer, :insurance_type])
+    |> Repo.preload([:insurer, :insurance_type, :customer])
     |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
     |> Enum.map(&policy_to_response/1)
   end
@@ -330,20 +395,22 @@ defmodule Ersventaja.Policies do
 
     query =
       from(p in Policy,
+        join: c in assoc(p, :customer),
         where:
-          not is_nil(p.customer_cpf_or_cnpj) and p.customer_cpf_or_cnpj != "" and
-            fragment("regexp_replace(?, '[^0-9]', '', 'g')", p.customer_cpf_or_cnpj) == ^digits and
+          not is_nil(c.cpf_cnpj) and c.cpf_cnpj != "" and
+            fragment("regexp_replace(?, '[^0-9]', '', 'g')", c.cpf_cnpj) == ^digits and
             p.end_date > ^today,
         order_by: [desc: p.end_date]
       )
 
     query
     |> Repo.all()
-    |> Repo.preload([:insurer, :insurance_type])
+    |> Repo.preload([:insurer, :insurance_type, :customer])
     |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
     |> Enum.map(&policy_to_response/1)
   end
 
+  defp normalize_cpf_cnpj(nil), do: ""
   defp normalize_cpf_cnpj(str), do: String.replace(str, ~r/[^0-9]/, "")
 
   def generate_download_token(policy_id) when is_integer(policy_id) do
@@ -381,7 +448,7 @@ defmodule Ersventaja.Policies do
   defp policies_from_query(query) do
     query
     |> Repo.all()
-    |> Repo.preload([:insurer, :insurance_type])
+    |> Repo.preload([:insurer, :insurance_type, :customer])
     |> Enum.map(&Map.merge(&1, %{file_name: get_file_name(&1.id)}))
     |> ResponseAdapter.get_policy_response()
   end

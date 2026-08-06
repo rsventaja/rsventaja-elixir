@@ -11,8 +11,12 @@
 # and so on) as they will fail if something goes wrong.
 
 alias Ersventaja.Repo
+alias Ersventaja.Customers
 alias Ersventaja.UserManager.Models.User
 alias Ersventaja.Policies.Models.{Policy, Insurer}
+alias Ersventaja.Customers.Models.Customer
+
+import Ecto.Query
 
 # ── User ──────────────────────────────────────────────────────────────────────
 unless Repo.get_by(User, username: "user") do
@@ -61,7 +65,6 @@ emails = [
 ]
 
 # ── Client pool (name / cpf / phone / email) ──────────────────────────────────
-# Some clients have multiple policies (and slightly varying names to test grouping)
 clients = [
   # -- clients vencendo em breve (< 7 dias) --
   %{name: "JOAO SILVA PEREIRA",         cpf: "111.222.333-01", phone: "(11) 91111-0001", email: "joao.silva@email.com"},
@@ -98,26 +101,35 @@ clients = [
   %{name: "INSTITUTO NOVO HORIZONTE",   cpf: "55.666.777/0001-22", phone: "(31) 95050-4040", email: "diretoria@inh.edu.br"},
 ]
 
-# ── Policy insertion ──────────────────────────────────────────────────────────
-
-# Returns true if a policy with same customer + detail already exists
-already_exists? = fn name, detail ->
-  import Ecto.Query
-  Repo.exists?(from p in Policy, where: p.customer_name == ^name and p.detail == ^detail)
+# ── Helper: get or create customer ────────────────────────────────────────────
+find_or_create_customer = fn client ->
+  case Customers.find_or_create_by_cpf_cnpj(client.cpf, %{
+         name: client.name,
+         phone: client.phone,
+         email: client.email
+       }) do
+    {:ok, customer} when not is_nil(customer) -> customer
+    _ -> nil
+  end
 end
 
-insert_policy = fn attrs ->
-  unless already_exists?.(attrs.customer_name, attrs.detail) do
+# ── Helper: check duplicate policy ────────────────────────────────────────────
+already_exists? = fn customer_id, detail ->
+  Repo.exists?(from p in Policy, where: p.customer_id == ^customer_id and p.detail == ^detail)
+end
+
+# ── Policy insertion ──────────────────────────────────────────────────────────
+insert_policy = fn client, detail, start_date, end_date, calculated, insurer_id ->
+  customer = find_or_create_customer.(client)
+
+  if customer && !already_exists?.(customer.id, detail) do
     Repo.insert!(%Policy{
-      customer_name:      attrs.customer_name,
-      detail:             Map.get(attrs, :detail, rand_detail.()),
-      start_date:         attrs.start_date,
-      end_date:           attrs.end_date,
-      calculated:         Map.get(attrs, :calculated, false),
-      insurer_id:         Map.get(attrs, :insurer_id, rand_insurer.()),
-      customer_cpf_or_cnpj: Map.get(attrs, :cpf),
-      customer_phone:     Map.get(attrs, :phone),
-      customer_email:     Map.get(attrs, :email)
+      customer_id: customer.id,
+      detail: detail,
+      start_date: start_date,
+      end_date: end_date,
+      calculated: calculated,
+      insurer_id: insurer_id
     })
   end
 end
@@ -132,43 +144,26 @@ soon_due = [
 ]
 
 Enum.each(soon_due, fn {client, days} ->
-  insert_policy.(%{
-    customer_name: client.name,
-    cpf: client.cpf, phone: client.phone, email: client.email,
-    start_date: Date.add(today, -(365 - days)),
-    end_date:   Date.add(today, days),
-    detail:     rand_detail.(),
-    insurer_id: rand_insurer.()
-  })
+  insert_policy.(client, rand_detail.(),
+    Date.add(today, -(365 - days)), Date.add(today, days),
+    false, rand_insurer.())
 end)
 
 # ── 2. Vencendo entre 8–30 dias ───────────────────────────────────────────────
-mid_due = Enum.with_index([
-  {Enum.at(clients, 3),  8},
-  {Enum.at(clients, 4), 10},
-  {Enum.at(clients, 5), 12},
-  {Enum.at(clients, 3), 14},   # Ana: 2ª apólice
-  {Enum.at(clients, 6), 15},
-  {Enum.at(clients, 7), 17},
-  {Enum.at(clients, 8), 19},
-  {Enum.at(clients, 9), 20},
-  {Enum.at(clients, 4), 22},   # Pedro: 2ª apólice
-  {Enum.at(clients, 5), 24},
-  {Enum.at(clients, 6), 25},
-  {Enum.at(clients, 7), 27},
-  {Enum.at(clients, 8), 28},
-  {Enum.at(clients, 9), 29},
-])
+mid_due = [
+  {Enum.at(clients, 3),  8},  {Enum.at(clients, 4), 10},
+  {Enum.at(clients, 5), 12},  {Enum.at(clients, 3), 14},
+  {Enum.at(clients, 6), 15},  {Enum.at(clients, 7), 17},
+  {Enum.at(clients, 8), 19},  {Enum.at(clients, 9), 20},
+  {Enum.at(clients, 4), 22},  {Enum.at(clients, 5), 24},
+  {Enum.at(clients, 6), 25},  {Enum.at(clients, 7), 27},
+  {Enum.at(clients, 8), 28},  {Enum.at(clients, 9), 29},
+]
 
-Enum.each(mid_due, fn {{client, days}, _i} ->
-  insert_policy.(%{
-    customer_name: client.name,
-    cpf: client.cpf, phone: client.phone, email: client.email,
-    start_date: Date.add(today, -(365 - days)),
-    end_date:   Date.add(today, days),
-    detail:     rand_detail.(),
-    insurer_id: rand_insurer.()
-  })
+Enum.each(mid_due, fn {client, days} ->
+  insert_policy.(client, rand_detail.(),
+    Date.add(today, -(365 - days)), Date.add(today, days),
+    false, rand_insurer.())
 end)
 
 # ── 3. Vigentes (vencendo daqui 31–300 dias) ──────────────────────────────────
@@ -179,14 +174,9 @@ vigent_offsets = [35, 45, 60, 75, 90, 120, 150, 180, 210, 240, 270, 300,
 
 Enum.zip(vigent_clients ++ vigent_clients, vigent_offsets)
 |> Enum.each(fn {client, days} ->
-  insert_policy.(%{
-    customer_name: client.name,
-    cpf: client.cpf, phone: client.phone, email: client.email,
-    start_date: Date.add(today, -(365 - days)),
-    end_date:   Date.add(today, days),
-    detail:     rand_detail.(),
-    insurer_id: rand_insurer.()
-  })
+  insert_policy.(client, rand_detail.(),
+    Date.add(today, -(365 - days)), Date.add(today, days),
+    false, rand_insurer.())
 end)
 
 # ── 4. Clientes com múltiplas apólices ────────────────────────────────────────
@@ -212,36 +202,30 @@ Enum.each(multi_policies, fn {client, days, detail} ->
   start_d = if days < 0,
     do:   Date.add(today, days - 365),
     else: Date.add(today, -(365 - days))
-  insert_policy.(%{
-    customer_name: client.name,
-    cpf: client.cpf, phone: client.phone, email: client.email,
-    start_date: start_d,
-    end_date:   Date.add(today, days),
-    detail:     detail,
-    insurer_id: rand_insurer.(),
-    calculated: days < 0
-  })
+  insert_policy.(client, detail, start_d, Date.add(today, days),
+    days < 0, rand_insurer.())
 end)
 
 # ── 5. Apólices vencidas (para testar filtro vigentes) ────────────────────────
 expired_names = [
-  "SILVIA MORAES TEIXEIRA", "BRUNO ANDRADE NUNES", "HELIO RODRIGUES PAZ",
-  "ELAINE CRISTINA VIDAL", "SERGIO LUIZ MONTEIRO"
+  {"SILVIA MORAES TEIXEIRA",    "444.555.660-00"},
+  {"BRUNO ANDRADE NUNES",       "444.555.661-01"},
+  {"HELIO RODRIGUES PAZ",       "444.555.662-02"},
+  {"ELAINE CRISTINA VIDAL",     "444.555.663-03"},
+  {"SERGIO LUIZ MONTEIRO",      "444.555.664-04"},
 ]
 
-Enum.each(Enum.with_index(expired_names), fn {name, i} ->
+Enum.each(Enum.with_index(expired_names), fn {{name, cpf}, i} ->
   days_past = -(i * 15 + 10)
-  insert_policy.(%{
-    customer_name: name,
-    cpf: "444.555.66#{i}-0#{i}",
+  client = %{
+    name: name,
+    cpf: cpf,
     phone: Enum.at(phones, rem(i, length(phones))),
-    email: Enum.at(emails, rem(i, length(emails))),
-    start_date: Date.add(today, days_past - 365),
-    end_date:   Date.add(today, days_past),
-    detail:     rand_detail.(),
-    insurer_id: rand_insurer.(),
-    calculated: true
-  })
+    email: Enum.at(emails, rem(i, length(emails)))
+  }
+  insert_policy.(client, rand_detail.(),
+    Date.add(today, days_past - 365), Date.add(today, days_past),
+    true, rand_insurer.())
 end)
 
 IO.puts("✅  Seeds concluídas!")

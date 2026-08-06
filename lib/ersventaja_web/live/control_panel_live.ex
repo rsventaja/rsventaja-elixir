@@ -62,6 +62,8 @@ defmodule ErsventajaWeb.ControlPanelLive do
           |> assign(client_query: "")
           |> assign(client_results: nil)
           |> assign(selected_client: nil)
+          |> assign(editing_client: false)
+          |> assign(client_edit_form: %{})
           |> assign(segfy_renewal_loading: false)
           |> assign(segfy_premiums_preview: nil)
           |> assign(segfy_quotation_url: nil)
@@ -169,7 +171,95 @@ defmodule ErsventajaWeb.ControlPanelLive do
 
   @impl true
   def handle_event("close_client", _params, socket) do
-    {:noreply, assign(socket, selected_client: nil)}
+    {:noreply, assign(socket, selected_client: nil, editing_client: false, client_edit_form: %{})}
+  end
+
+  @impl true
+  def handle_event("start_edit_client", _params, socket) do
+    client = socket.assigns.selected_client
+
+    form = %{
+      "name" => client.name || "",
+      "cpf_cnpj" => client.cpf_cnpj || "",
+      "phone" => client.phones |> List.first() || "",
+      "email" => client.emails |> List.first() || ""
+    }
+
+    {:noreply, assign(socket, editing_client: true, client_edit_form: form)}
+  end
+
+  @impl true
+  def handle_event("cancel_edit_client", _params, socket) do
+    {:noreply, assign(socket, editing_client: false, client_edit_form: %{})}
+  end
+
+  @impl true
+  def handle_event("update_client_edit_form", %{"client_edit_form" => form_params}, socket) do
+    form = Map.merge(socket.assigns.client_edit_form, form_params)
+    {:noreply, assign(socket, client_edit_form: form)}
+  end
+
+  @impl true
+  def handle_event("save_client", %{"client_edit_form" => form_params}, socket) do
+    client = socket.assigns.selected_client
+    customer_id = client.customer_id
+
+    new_name = String.upcase(form_params["name"] || "")
+    new_cpf = form_params["cpf_cnpj"] || ""
+    new_phone = form_params["phone"] || ""
+    new_email = form_params["email"] || ""
+
+    # Update the customer record via Customers context
+    customer_result =
+      if customer_id do
+        # Existing customer — update
+        Ersventaja.Customers.update_customer(
+          Ersventaja.Customers.get_customer!(customer_id),
+          %{name: new_name, cpf_cnpj: new_cpf, phone: new_phone, email: new_email}
+        )
+      else
+        # No customer_id yet (orphan policies) — find or create by CPF
+        Ersventaja.Customers.find_or_create_by_cpf_cnpj(new_cpf, %{
+          name: new_name,
+          phone: new_phone,
+          email: new_email
+        })
+      end
+
+    case customer_result do
+      {:ok, updated_customer} ->
+        # Refresh the policies list and client results
+        policies = Ersventaja.Policies.last_30_days()
+        client_results = group_clients_by_cpf(policies)
+
+        # Build updated client directly from the updated customer + existing policies
+        updated_client = %{
+          customer_id: updated_customer.id,
+          cpf_cnpj: updated_customer.cpf_cnpj,
+          name: updated_customer.name,
+          phones: if(updated_customer.phone && updated_customer.phone != "",
+            do: [updated_customer.phone], else: []),
+          emails: if(updated_customer.email && updated_customer.email != "",
+            do: [updated_customer.email], else: []),
+          policies: client.policies
+        }
+
+        {:noreply,
+         socket
+         |> assign(
+           policies: policies,
+           selected_client: updated_client,
+           client_results: client_results,
+           editing_client: false,
+           client_edit_form: %{}
+         )
+         |> put_flash(:success, "Cliente atualizado com sucesso!")}
+
+      {:error, changeset} ->
+        {:noreply,
+         socket
+         |> put_flash(:warning, "Erro ao atualizar: #{inspect(changeset.errors)}")}
+    end
   end
 
   @impl true
@@ -392,25 +482,53 @@ defmodule ErsventajaWeb.ControlPanelLive do
     }
 
     case Policies.update_policy(policy_id, attrs) do
-      {:ok, updated_policy} ->
-        # Refresh all policy lists
+      {:ok, _updated_policy} ->
+        # Fetch completely fresh data from DB to guarantee we show the latest values
+        fresh_policy = Policies.get_policy(policy_id)
         policies = Policies.last_30_days()
 
         # Update query results if the policy is in them
-        query_result = update_policy_in_list(socket.assigns.query_result, updated_policy)
+        query_result =
+          if fresh_policy,
+            do: update_policy_in_list(socket.assigns.query_result, fresh_policy),
+            else: socket.assigns.query_result
 
         query_current_result =
-          update_policy_in_list(socket.assigns.query_current_result, updated_policy)
+          if fresh_policy,
+            do: update_policy_in_list(socket.assigns.query_current_result, fresh_policy),
+            else: socket.assigns.query_current_result
+
+        # Refresh client results if the client tab has data
+        client_results =
+          if socket.assigns.client_results do
+            group_clients_by_cpf(policies)
+          else
+            nil
+          end
+
+        # If a client detail is open, refresh it too
+        selected_client =
+          case socket.assigns.selected_client do
+            nil ->
+              nil
+
+            client ->
+              Enum.find(client_results || [], fn c ->
+                c.customer_id == client.customer_id
+              end) || client
+          end
 
         socket =
           socket
           |> assign(
-            selected_policy: updated_policy,
+            selected_policy: fresh_policy,
             editing_policy: false,
             edit_form: %{},
             policies: policies,
             query_result: query_result,
-            query_current_result: query_current_result
+            query_current_result: query_current_result,
+            client_results: client_results,
+            selected_client: selected_client
           )
           |> put_flash(:success, "Apólice atualizada com sucesso!")
 
@@ -1369,6 +1487,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
     uniq = fn list -> list |> Enum.reject(&(is_nil(&1) or &1 == "")) |> Enum.uniq() end
 
     %{
+      customer_id: policies |> Enum.map(& &1[:customer_id]) |> Enum.reject(&is_nil/1) |> List.first(),
       cpf_cnpj: policies |> Enum.map(& &1.customer_cpf_or_cnpj) |> uniq.() |> List.first(),
       name: policies |> Enum.map(& &1.customer_name) |> uniq.() |> List.first() || "—",
       phones: policies |> Enum.map(& &1.customer_phone) |> uniq.(),
@@ -3081,50 +3200,97 @@ defmodule ErsventajaWeb.ControlPanelLive do
             <%= if @selected_client do %>
               <%# ── Client detail view ── %>
               <div class="details-header" style="margin-bottom: 1.5em; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1em;">
-                <button phx-click="close_client" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 10px 20px; font-size: 15px;">
-                  <i class="fas fa-arrow-left"></i> Voltar
-                </button>
+                <div style="display: flex; gap: 0.75em;">
+                  <button phx-click="close_client" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 10px 20px; font-size: 15px;">
+                    <i class="fas fa-arrow-left"></i> Voltar
+                  </button>
+                  <%= if !@editing_client do %>
+                    <button phx-click="start_edit_client" class="btn-primary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 10px 20px; font-size: 15px;">
+                      <i class="fas fa-edit"></i> Editar
+                    </button>
+                  <% end %>
+                </div>
               </div>
 
-              <div class="client-profile">
-                <div class="client-profile-header">
-                  <div class="client-avatar"><i class="fas fa-user"></i></div>
-                  <div>
-                    <p class="client-name"><%= @selected_client.name %></p>
-                    <%= if @selected_client.cpf_cnpj do %>
-                      <p class="client-cpf"><i class="fas fa-id-card" style="margin-right: 0.3em;"></i><%= @selected_client.cpf_cnpj %></p>
+              <%= if @editing_client do %>
+                <%# ── Client edit form ── %>
+                <div class="client-profile" style="background: #f8fafc; border: 2px solid #4A7AC2; border-radius: 12px; padding: 1.5em; margin-bottom: 1.5em;">
+                  <form phx-submit="save_client" phx-change="update_client_edit_form">
+                    <h3 style="font-size: 20px; font-weight: 600; color: #1e293b; margin-bottom: 1.25em;">
+                      <i class="fas fa-user-edit" style="color: #4A7AC2; margin-right: 0.5em;"></i>Editar Cliente
+                    </h3>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-bottom: 1em;">
+                      <div>
+                        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.35em; color: #475569;">Nome</label>
+                        <input type="text" name="client_edit_form[name]" value={@client_edit_form["name"]} class="form-input" placeholder="Nome do cliente" />
+                      </div>
+                      <div>
+                        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.35em; color: #475569;">CPF/CNPJ</label>
+                        <input type="text" name="client_edit_form[cpf_cnpj]" value={@client_edit_form["cpf_cnpj"]} class="form-input" placeholder="000.000.000-00" />
+                      </div>
+                      <div>
+                        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.35em; color: #475569;">Telefone</label>
+                        <input type="text" name="client_edit_form[phone]" value={@client_edit_form["phone"]} class="form-input" placeholder="(00) 00000-0000" />
+                      </div>
+                      <div>
+                        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.35em; color: #475569;">E-mail</label>
+                        <input type="text" name="client_edit_form[email]" value={@client_edit_form["email"]} class="form-input" placeholder="cliente@email.com" />
+                      </div>
+                    </div>
+
+                    <div style="display: flex; gap: 0.75em; justify-content: flex-end;">
+                      <button type="button" phx-click="cancel_edit_client" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 10px 20px; font-size: 15px;">
+                        Cancelar
+                      </button>
+                      <button type="submit" class="btn-primary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 10px 20px; font-size: 15px;">
+                        <i class="fas fa-save"></i> Salvar
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              <% else %>
+                <%# ── Client display view ── %>
+                <div class="client-profile">
+                  <div class="client-profile-header">
+                    <div class="client-avatar"><i class="fas fa-user"></i></div>
+                    <div>
+                      <p class="client-name"><%= @selected_client.name %></p>
+                      <%= if @selected_client.cpf_cnpj do %>
+                        <p class="client-cpf"><i class="fas fa-id-card" style="margin-right: 0.3em;"></i><%= @selected_client.cpf_cnpj %></p>
+                      <% end %>
+                    </div>
+                    <div style="margin-left: auto; background: linear-gradient(90deg,#3D5FA3,#7DCDEB); color: white; border-radius: 20px; padding: 6px 16px; font-size: 13px; font-weight: 600; white-space: nowrap; flex-shrink: 0;">
+                      <%= length(@selected_client.policies) %> apólice<%= if length(@selected_client.policies) != 1, do: "s", else: "" %>
+                    </div>
+                  </div>
+
+                  <div class="client-info-grid">
+                    <%= if @selected_client.phones != [] do %>
+                      <div class="client-info-card">
+                        <div class="client-info-label"><i class="fas fa-phone"></i> Telefone<%= if length(@selected_client.phones) > 1, do: "s", else: "" %></div>
+                        <div class="client-info-value">
+                          <%= for phone <- @selected_client.phones do %>
+                            <a href={"https://wa.me/+55#{String.replace(phone, ~r/\D/, "")}"} target="_blank">
+                              <i class="fab fa-whatsapp" style="color: #25D366; margin-right: 0.3em;"></i><%= phone %>
+                            </a>
+                          <% end %>
+                        </div>
+                      </div>
+                    <% end %>
+                    <%= if @selected_client.emails != [] do %>
+                      <div class="client-info-card">
+                        <div class="client-info-label"><i class="fas fa-envelope"></i> E-mail<%= if length(@selected_client.emails) > 1, do: "s", else: "" %></div>
+                        <div class="client-info-value">
+                          <%= for email <- @selected_client.emails do %>
+                            <a href={"mailto:#{email}"}><i class="fas fa-envelope" style="margin-right: 0.3em; color: #4A7AC2;"></i><%= email %></a>
+                          <% end %>
+                        </div>
+                      </div>
                     <% end %>
                   </div>
-                  <div style="margin-left: auto; background: linear-gradient(90deg,#3D5FA3,#7DCDEB); color: white; border-radius: 20px; padding: 6px 16px; font-size: 13px; font-weight: 600; white-space: nowrap; flex-shrink: 0;">
-                    <%= length(@selected_client.policies) %> apólice<%= if length(@selected_client.policies) != 1, do: "s", else: "" %>
-                  </div>
                 </div>
-
-                <div class="client-info-grid">
-                  <%= if @selected_client.phones != [] do %>
-                    <div class="client-info-card">
-                      <div class="client-info-label"><i class="fas fa-phone"></i> Telefone<%= if length(@selected_client.phones) > 1, do: "s", else: "" %></div>
-                      <div class="client-info-value">
-                        <%= for phone <- @selected_client.phones do %>
-                          <a href={"https://wa.me/+55#{String.replace(phone, ~r/\D/, "")}"} target="_blank">
-                            <i class="fab fa-whatsapp" style="color: #25D366; margin-right: 0.3em;"></i><%= phone %>
-                          </a>
-                        <% end %>
-                      </div>
-                    </div>
-                  <% end %>
-                  <%= if @selected_client.emails != [] do %>
-                    <div class="client-info-card">
-                      <div class="client-info-label"><i class="fas fa-envelope"></i> E-mail<%= if length(@selected_client.emails) > 1, do: "s", else: "" %></div>
-                      <div class="client-info-value">
-                        <%= for email <- @selected_client.emails do %>
-                          <a href={"mailto:#{email}"}><i class="fas fa-envelope" style="margin-right: 0.3em; color: #4A7AC2;"></i><%= email %></a>
-                        <% end %>
-                      </div>
-                    </div>
-                  <% end %>
-                </div>
-              </div>
+              <% end %>
 
               <div class="client-policies-title">
                 <i class="fas fa-file-contract" style="color: #4A7AC2;"></i> Apólices
