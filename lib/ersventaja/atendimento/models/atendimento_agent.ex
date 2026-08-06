@@ -7,6 +7,7 @@ defmodule Ersventaja.Atendimento.Models.AtendimentoAgent do
   @fields ~w(
     name
     phone
+    active
   )a
 
   @required_fields ~w(
@@ -17,6 +18,7 @@ defmodule Ersventaja.Atendimento.Models.AtendimentoAgent do
   schema "atendimento_agents" do
     field(:name, :string)
     field(:phone, :string)
+    field(:active, :boolean, default: true)
 
     timestamps()
   end

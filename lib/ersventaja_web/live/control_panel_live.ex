@@ -888,21 +888,14 @@ defmodule ErsventajaWeb.ControlPanelLive do
 
   @impl true
   def handle_event("delete_agent", %{"id" => id}, socket) do
-    try do
-      agent = Atendimento.get_agent!(String.to_integer(id))
-      Atendimento.delete_agent(agent)
-      agents = Atendimento.list_agents()
+    agent = Atendimento.get_agent!(String.to_integer(id))
+    {:ok, _} = Atendimento.delete_agent(agent)
+    agents = Atendimento.list_agents()
 
-      {:noreply,
-       socket
-       |> put_flash(:success, "Agente removido com sucesso!")
-       |> assign(atendimento_agents: agents)}
-    rescue
-      _ ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "Erro ao remover agente.")}
-    end
+    {:noreply,
+     socket
+     |> put_flash(:success, "Agente desativado com sucesso!")
+     |> assign(atendimento_agents: agents)}
   end
 
   @impl true

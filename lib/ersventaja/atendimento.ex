@@ -22,7 +22,7 @@ defmodule Ersventaja.Atendimento do
   Lista todos os agentes de atendimento cadastrados.
   """
   def list_agents do
-    Repo.all(from(a in AtendimentoAgent, order_by: a.name))
+    Repo.all(from(a in AtendimentoAgent, where: a.active == true, order_by: a.name))
   end
 
   @doc """
@@ -54,10 +54,13 @@ defmodule Ersventaja.Atendimento do
   end
 
   @doc """
-  Remove um agente.
+  Desativa um agente (soft delete). O agente não aparecerá mais na listagem
+  nem será atribuído a novos atendimentos, mas seu nome permanece no histórico.
   """
   def delete_agent(%AtendimentoAgent{} = agent) do
-    Repo.delete(agent)
+    agent
+    |> AtendimentoAgent.changeset(%{active: false})
+    |> Repo.update()
   end
 
   @doc """
@@ -85,6 +88,7 @@ defmodule Ersventaja.Atendimento do
     else
       Repo.exists?(
         from(a in AtendimentoAgent,
+          where: a.active == true,
           where:
             fragment(
               "regexp_replace(?, '[^0-9]', '', 'g')",
@@ -152,6 +156,7 @@ defmodule Ersventaja.Atendimento do
       from(a in Atendimento,
         join: ag in AtendimentoAgent,
         on: a.agent_id == ag.id,
+        where: ag.active == true,
         where:
           fragment(
             "regexp_replace(?, '[^0-9]', '', 'g')",
