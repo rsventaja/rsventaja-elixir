@@ -82,6 +82,13 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
     GenServer.cast(pid, :end_by_agent)
   end
 
+  @doc """
+  Encerra o atendimento porque o número foi bloqueado.
+  """
+  def end_by_block(pid) do
+    GenServer.cast(pid, :end_by_block)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -287,6 +294,32 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       "agent",
       "👋 *Atendimento encerrado pelo atendente.* Obrigado por nos contatar!"
     )
+  end
+
+  @impl true
+  def handle_cast(:end_by_block, state) do
+    # Finaliza no banco sem notificar o cliente
+    if state.status == :active do
+      state = %{state | status: :ending}
+      atendimento = Atendimento.get_atendimento(state.atendimento_id)
+
+      if atendimento && atendimento.status == "active" do
+        Atendimento.end_atendimento(atendimento, "blocked")
+      end
+
+      # Só o atendente recebe notificação
+      MetaApi.send_text(
+        state.phone_number_id,
+        state.agent_phone,
+        "🚫 *Atendimento ##{state.atendimento_id} encerrado.* " <>
+          "O número #{state.client_phone} foi bloqueado."
+      )
+
+      Logger.info("[Atendimento] ##{state.atendimento_id} ended by block, agent notified")
+    end
+
+    if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
+    {:stop, :normal, %{state | status: :ended}}
   end
 
   # ---------------------------------------------------------------------------

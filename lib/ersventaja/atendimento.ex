@@ -302,12 +302,32 @@ defmodule Ersventaja.Atendimento do
         on_conflict: :nothing
       )
 
-    # Encerra atendimentos ativos deste número sem notificar WhatsApp
+    # Encerra atendimentos ativos via GenServer (notifica ambas as partes)
     from(a in Atendimento, where: a.whatsapp_phone == ^phone, where: a.status == "active")
     |> Repo.all()
     |> Enum.each(fn att ->
-      end_atendimento(att, "blocked")
-      Logger.info("[Atendimento] ##{att.id} ended because sender was blocked: #{phone}")
+      child_id = :"atendimento_#{att.id}"
+
+      pid =
+        Ersventaja.Atendimento.AtendimentoSupervisor
+        |> DynamicSupervisor.which_children()
+        |> Enum.find_value(fn
+          {^child_id, p, :worker, _} -> p
+          _ -> nil
+        end)
+
+      if pid && Process.alive?(pid) do
+        # Encerra via GenServer → notifica cliente e atendente
+        Ersventaja.Atendimento.AtendimentoServer.end_by_block(pid)
+
+        Logger.info(
+          "[Atendimento] ##{att.id} ended via GenServer because sender was blocked: #{phone}"
+        )
+      else
+        # GenServer não está rodando → encerra direto no banco
+        end_atendimento(att, "blocked")
+        Logger.info("[Atendimento] ##{att.id} ended in DB because sender was blocked: #{phone}")
+      end
     end)
 
     result
