@@ -1,0 +1,197 @@
+defmodule Ersventaja.Atendimento do
+  @moduledoc """
+  Contexto para gestão de atendimentos via WhatsApp.
+
+  Gerencia agentes de atendimento, atendimentos ativos/finalizados,
+  e mensagens trocadas entre clientes e atendentes.
+  """
+
+  alias Ersventaja.Atendimento.Models.AtendimentoAgent
+  alias Ersventaja.Atendimento.Models.Atendimento
+  alias Ersventaja.Atendimento.Models.AtendimentoMessage
+  alias Ersventaja.Repo
+
+  import Ecto.Query
+
+  # ---------------------------------------------------------------------------
+  # Agentes (AtendimentoAgent CRUD)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Lista todos os agentes de atendimento cadastrados.
+  """
+  def list_agents do
+    Repo.all(from(a in AtendimentoAgent, order_by: a.name))
+  end
+
+  @doc """
+  Busca um agente pelo ID (levanta Ecto.NoResultsError se não encontrado).
+  """
+  def get_agent!(id), do: Repo.get!(AtendimentoAgent, id)
+
+  @doc """
+  Busca um agente pelo ID, retornando nil se não encontrado.
+  """
+  def get_agent(id), do: Repo.get(AtendimentoAgent, id)
+
+  @doc """
+  Cria um novo agente de atendimento.
+  """
+  def create_agent(attrs) do
+    %AtendimentoAgent{}
+    |> AtendimentoAgent.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Atualiza um agente existente.
+  """
+  def update_agent(%AtendimentoAgent{} = agent, attrs) do
+    agent
+    |> AtendimentoAgent.changeset(attrs)
+    |> Repo.update()
+  end
+
+  @doc """
+  Remove um agente.
+  """
+  def delete_agent(%AtendimentoAgent{} = agent) do
+    Repo.delete(agent)
+  end
+
+  @doc """
+  Retorna um agente aleatório da lista de cadastrados.
+  Retorna nil se não houver agentes.
+  """
+  def get_random_agent do
+    agents = list_agents()
+
+    if agents == [] do
+      nil
+    else
+      Enum.random(agents)
+    end
+  end
+
+  @doc """
+  Verifica se um número de telefone pertence a um agente cadastrado.
+  """
+  def is_agent_number?(phone) when is_binary(phone) do
+    Repo.exists?(from(a in AtendimentoAgent, where: a.phone == ^phone))
+  end
+
+  def is_agent_number?(_), do: false
+
+  # ---------------------------------------------------------------------------
+  # Atendimentos
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Cria um novo atendimento.
+  """
+  def create_atendimento(attrs) do
+    %Atendimento{}
+    |> Atendimento.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Busca um atendimento pelo ID.
+  """
+  def get_atendimento(id), do: Repo.get(Atendimento, id)
+
+  @doc """
+  Busca um atendimento pelo ID com preload de mensagens e agente.
+  """
+  def get_atendimento_with_relations(id) do
+    Atendimento
+    |> Repo.get(id)
+    |> Repo.preload([:messages, :agent, :customer])
+  end
+
+  @doc """
+  Busca o atendimento ativo para um dado telefone WhatsApp de cliente.
+  Retorna nil se não houver atendimento ativo.
+  """
+  def get_active_atendimento_by_phone(whatsapp_phone) do
+    from(a in Atendimento,
+      where: a.whatsapp_phone == ^whatsapp_phone,
+      where: a.status == "active",
+      order_by: [desc: a.started_at],
+      limit: 1
+    )
+    |> Repo.one()
+    |> Repo.preload([:agent, :customer])
+  end
+
+  @doc """
+  Busca o atendimento ativo associado a um agente (pelo telefone do agente).
+  Retorna nil se não houver.
+  """
+  def get_active_atendimento_for_agent(agent_phone) do
+    from(a in Atendimento,
+      join: ag in AtendimentoAgent, on: a.agent_id == ag.id,
+      where: ag.phone == ^agent_phone,
+      where: a.status == "active",
+      order_by: [desc: a.started_at],
+      limit: 1
+    )
+    |> Repo.one()
+    |> Repo.preload([:agent, :customer])
+  end
+
+  @doc """
+  Finaliza um atendimento, registrando status, timestamp e motivo.
+  """
+  def end_atendimento(%Atendimento{} = atendimento, ended_by) do
+    atendimento
+    |> Atendimento.changeset(%{
+      status: if(ended_by == "timeout", do: "expired", else: "ended"),
+      ended_at: DateTime.utc_now(),
+      ended_by: ended_by
+    })
+    |> Repo.update()
+  end
+
+  @doc """
+  Lista atendimentos filtrados por status.
+  """
+  def list_atendimentos(status \\ "active") do
+    query = from(a in Atendimento, order_by: [desc: a.started_at])
+
+    query =
+      case status do
+        "all" -> query
+        "active" -> from(a in query, where: a.status == "active")
+        "ended" -> from(a in query, where: a.status == "ended")
+        "expired" -> from(a in query, where: a.status == "expired")
+        _ -> query
+      end
+
+    Repo.all(query) |> Repo.preload([:agent, :customer])
+  end
+
+  # ---------------------------------------------------------------------------
+  # Mensagens
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Adiciona uma mensagem a um atendimento.
+  """
+  def add_message(attrs) do
+    %AtendimentoMessage{}
+    |> AtendimentoMessage.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Lista mensagens de um atendimento, ordenadas por data de criação.
+  """
+  def get_messages(atendimento_id) do
+    from(m in AtendimentoMessage,
+      where: m.atendimento_id == ^atendimento_id,
+      order_by: [asc: m.inserted_at]
+    )
+    |> Repo.all()
+  end
+end

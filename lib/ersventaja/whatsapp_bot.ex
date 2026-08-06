@@ -8,14 +8,24 @@ defmodule Ersventaja.WhatsappBot do
   # Key = whatsapp phone number string, Value = %{cpf_cnpj: "...", timestamp: DateTime}
   @pending_consent_table :whatsapp_pending_consent
 
+  # ETS table for tracking atendimento flow state per phone number.
+  # Key = whatsapp phone number string,
+  # Value = %{step: :waiting_cpf | :waiting_category | :waiting_details,
+  #            cpf: "...", customer_name: "...", category: "..."}
+  @atendimento_flow_table :whatsapp_atendimento_flow
+
   # Interactive message IDs — must match between sent messages and webhook replies
   @list_id_apolice "apolice"
   @list_id_renovacao "renovacao"
   @list_id_contato "contato"
   @list_id_produtos "produtos"
   @list_id_revogar "revogar"
+  @list_id_atendimento "atendimento"
   @btn_id_consent_sim "consent_sim"
   @btn_id_consent_nao "consent_nao"
+  @btn_id_cat_duvida "cat_duvida"
+  @btn_id_cat_sinistro "cat_sinistro"
+  @btn_id_cat_troca_veiculo "cat_troca_veiculo"
 
   # ---------------------------------------------------------------------------
   # ETS table lifecycle
@@ -29,6 +39,11 @@ defmodule Ersventaja.WhatsappBot do
     unless :ets.whereis(@pending_consent_table) != :undefined do
       @pending_consent_table =
         :ets.new(@pending_consent_table, [:set, :public, :named_table, read_concurrency: true])
+    end
+
+    unless :ets.whereis(@atendimento_flow_table) != :undefined do
+      @atendimento_flow_table =
+        :ets.new(@atendimento_flow_table, [:set, :public, :named_table, read_concurrency: true])
     end
 
     :ok
@@ -67,7 +82,18 @@ defmodule Ersventaja.WhatsappBot do
          "text" => %{"body" => body}
        }) do
     text = String.trim(String.downcase(body))
-    handle_text_message(phone_number_id, from, text)
+
+    # Check for active atendimento routing
+    cond do
+      is_agent_number?(from) ->
+        route_agent_text_to_atendimento(phone_number_id, from, text)
+
+      has_active_atendimento?(from) ->
+        route_client_text_to_atendimento(phone_number_id, from, text)
+
+      true ->
+        handle_text_message(phone_number_id, from, text)
+    end
   end
 
   defp handle_message(phone_number_id, %{
@@ -75,7 +101,42 @@ defmodule Ersventaja.WhatsappBot do
          "type" => "interactive",
          "interactive" => interactive
        }) do
-    handle_interactive_message(phone_number_id, from, interactive)
+    # Check for active atendimento routing first
+    cond do
+      is_agent_number?(from) ->
+        # Agents don't use interactive messages in atendimento — fall through to menu
+        send_main_menu(phone_number_id, from)
+
+      has_active_atendimento?(from) ->
+        # Client in active atendimento — still allow interactive (e.g., buttons)
+        handle_interactive_message(phone_number_id, from, interactive)
+
+      true ->
+        handle_interactive_message(phone_number_id, from, interactive)
+    end
+  end
+
+  defp handle_message(phone_number_id, %{
+         "from" => from,
+         "type" => type
+       } = msg)
+       when type in ["image", "audio", "document"] do
+    # Media messages — route to atendimento if active
+    cond do
+      is_agent_number?(from) ->
+        route_agent_media_to_atendimento(phone_number_id, from, msg)
+
+      has_active_atendimento?(from) ->
+        route_client_media_to_atendimento(phone_number_id, from, msg)
+
+      true ->
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "No momento só consigo responder a mensagens de texto ou botões interativos. " <>
+            "Toque nos botões ou envie *menu* para ver as opções."
+        )
+    end
   end
 
   defp handle_message(phone_number_id, %{"from" => from}) do
@@ -93,6 +154,10 @@ defmodule Ersventaja.WhatsappBot do
 
   defp handle_text_message(phone_number_id, from, text) do
     cond do
+      # Atendimento flow — check ETS state for this phone
+      is_in_atendimento_flow?(from) ->
+        handle_atendimento_flow_step(phone_number_id, from, text)
+
       # Revocation command — any time
       String.starts_with?(text, "revogar") ->
         handle_revoke(phone_number_id, from)
@@ -151,14 +216,18 @@ defmodule Ersventaja.WhatsappBot do
          "type" => "button_reply",
          "button_reply" => %{"id" => btn_id}
        }) do
-    case btn_id do
-      @btn_id_consent_sim ->
+    cond do
+      # Atendimento category selection
+      btn_id in [@btn_id_cat_duvida, @btn_id_cat_sinistro, @btn_id_cat_troca_veiculo] ->
+        handle_atendimento_category(phone_number_id, from, btn_id)
+
+      btn_id == @btn_id_consent_sim ->
         give_consent_and_send_policies(phone_number_id, from)
 
-      @btn_id_consent_nao ->
+      btn_id == @btn_id_consent_nao ->
         handle_consent_refused(phone_number_id, from)
 
-      _ ->
+      true ->
         send_main_menu(phone_number_id, from)
     end
   end
@@ -179,6 +248,9 @@ defmodule Ersventaja.WhatsappBot do
 
       @list_id_produtos ->
         send_produtos_info(phone_number_id, from)
+
+      @list_id_atendimento ->
+        ask_for_cpf_atendimento(phone_number_id, from)
 
       @list_id_revogar ->
         handle_revoke(phone_number_id, from)
@@ -201,9 +273,8 @@ defmodule Ersventaja.WhatsappBot do
         title: "Menu principal",
         rows: [
           %{id: @list_id_apolice, title: "📋 Baixar apólice", description: "Informe seu CPF/CNPJ"},
-          %{id: @list_id_renovacao, title: "🔄 Renovação", description: "Saiba como renovar"},
           %{id: @list_id_contato, title: "📞 Contato", description: "Fale com a corretora"},
-          %{id: @list_id_produtos, title: "🛡️ Produtos", description: "Conheça nossos seguros"},
+          %{id: @list_id_atendimento, title: "🎫 Atendimento", description: "Fale com um atendente"},
           %{
             id: @list_id_revogar,
             title: "🔒 Revogar LGPD",
@@ -562,4 +633,378 @@ defmodule Ersventaja.WhatsappBot do
   defp format_date(nil), do: "N/A"
   defp format_date(%Date{} = d), do: Calendar.strftime(d, "%d/%m/%Y")
   defp format_date(s) when is_binary(s), do: s
+
+  # ---------------------------------------------------------------------------
+  # Atendimento flow — ETS state helpers
+  # ---------------------------------------------------------------------------
+
+  defp get_atendimento_flow(from) do
+    case :ets.lookup(@atendimento_flow_table, from) do
+      [{^from, data}] -> data
+      [] -> nil
+    end
+  end
+
+  defp set_atendimento_flow(from, data) do
+    :ets.insert(@atendimento_flow_table, {from, Map.put(data, :timestamp, DateTime.utc_now())})
+  end
+
+  defp clear_atendimento_flow(from) do
+    :ets.delete(@atendimento_flow_table, from)
+  end
+
+  defp is_in_atendimento_flow?(from) do
+    case get_atendimento_flow(from) do
+      %{step: _} -> true
+      nil -> false
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Atendimento flow — step handlers
+  # ---------------------------------------------------------------------------
+
+  defp ask_for_cpf_atendimento(phone_number_id, from) do
+    set_atendimento_flow(from, %{step: :waiting_cpf})
+
+    MetaApi.send_text(
+      phone_number_id,
+      from,
+      "Para iniciar o atendimento, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."
+    )
+  end
+
+  defp handle_atendimento_flow_step(phone_number_id, from, text) do
+    flow = get_atendimento_flow(from)
+
+    case flow.step do
+      :waiting_cpf ->
+        handle_atendimento_cpf(phone_number_id, from, text)
+
+      :waiting_category ->
+        # User sent text instead of clicking a category button — remind them
+        send_atendimento_category_buttons(phone_number_id, from, flow)
+
+      :waiting_details ->
+        handle_atendimento_details(phone_number_id, from, text, flow)
+    end
+  end
+
+  defp handle_atendimento_cpf(phone_number_id, from, text) do
+    digits = String.replace(text, ~r/[^0-9]/, "")
+
+    if String.length(digits) in [11, 14] do
+      # Look up customer name
+      customer = Ersventaja.Customers.get_by_cpf_cnpj(digits)
+      customer_name = if customer, do: customer.name, else: "Cliente"
+
+      flow = %{
+        step: :waiting_category,
+        cpf: digits,
+        customer_name: customer_name
+      }
+
+      set_atendimento_flow(from, flow)
+
+      send_atendimento_category_buttons(phone_number_id, from, flow)
+    else
+      MetaApi.send_text(
+        phone_number_id,
+        from,
+        "❌ *CPF/CNPJ inválido.* Por favor, informe um CPF (11 dígitos) ou CNPJ (14 dígitos)."
+      )
+    end
+  end
+
+  defp send_atendimento_category_buttons(phone_number_id, from, flow) do
+    greeting = if flow.customer_name != "Cliente",
+      do: "Olá, *#{flow.customer_name}*! ",
+      else: ""
+
+    MetaApi.send_interactive_buttons(
+      phone_number_id,
+      from,
+      "#{greeting}Qual o *motivo do atendimento*?",
+      [
+        %{id: @btn_id_cat_duvida, title: "❓ Dúvida"},
+        %{id: @btn_id_cat_sinistro, title: "🚨 Sinistro"},
+        %{id: @btn_id_cat_troca_veiculo, title: "🚗 Troca de veículo"}
+      ],
+      footer: "Escolha uma das opções acima"
+    )
+  end
+
+  defp handle_atendimento_category(phone_number_id, from, btn_id) do
+    flow = get_atendimento_flow(from)
+
+    {category, prompt} =
+      case btn_id do
+        @btn_id_cat_duvida ->
+          {"duvida",
+           "Digite sua *dúvida em uma única mensagem*. Se precisar, anexe arquivos ou fotos.\n\n" <>
+             "✏️ Escreva abaixo:"}
+
+        @btn_id_cat_sinistro ->
+          {"sinistro",
+           "Esperamos que esteja tudo bem! 🙏\n\n" <>
+             "Por favor, nos dê *mais detalhes sobre a ocorrência*:\n" <>
+             "• O que aconteceu?\n" <>
+             "• Quando ocorreu?\n" <>
+             "• Onde ocorreu?\n\n" <>
+             "Se tiver *fotos ou documentos*, pode anexá-los.\n\n" <>
+             "✏️ Escreva abaixo:"}
+
+        @btn_id_cat_troca_veiculo ->
+          {"troca_veiculo",
+           "Para a troca de veículo, precisamos de algumas informações:\n\n" <>
+             "• *Qual a data prevista para retirada do veículo?*\n" <>
+             "• Se já possuir a *nota fiscal*, pode anexá-la.\n\n" <>
+             "✏️ Escreva abaixo:"}
+      end
+
+    new_flow = Map.merge(flow, %{step: :waiting_details, category: category})
+    set_atendimento_flow(from, new_flow)
+
+    MetaApi.send_text(phone_number_id, from, prompt)
+  end
+
+  defp handle_atendimento_details(phone_number_id, from, text, flow) do
+    # Create the atendimento
+    create_and_start_atendimento(phone_number_id, from, text, flow)
+    clear_atendimento_flow(from)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Atendimento — creation and GenServer start
+  # ---------------------------------------------------------------------------
+
+  defp create_and_start_atendimento(phone_number_id, from, details_text, flow) do
+    agent = Ersventaja.Atendimento.get_random_agent()
+
+    if is_nil(agent) do
+      MetaApi.send_text(
+        phone_number_id,
+        from,
+        "❌ Não há atendentes disponíveis no momento. " <>
+          "Por favor, entre em contato pelo e-mail: roberto@rsventaja.com"
+      )
+    else
+      # Create atendimento in DB
+      case Ersventaja.Atendimento.create_atendimento(%{
+        whatsapp_phone: from,
+        cpf_cnpj: flow.cpf,
+        customer_name: flow.customer_name,
+        category: flow.category,
+        status: "active",
+        started_at: DateTime.utc_now(),
+        agent_id: agent.id
+      }) do
+        {:ok, atendimento} ->
+          # Start GenServer
+          server_data = %{
+            atendimento_id: atendimento.id,
+            client_phone: from,
+            agent_phone: agent.phone,
+            phone_number_id: phone_number_id,
+            category: flow.category,
+            customer_name: flow.customer_name,
+            cpf_cnpj: flow.cpf
+          }
+
+          # Create customer record if needed
+          if flow.customer_name != "Cliente" do
+            Ersventaja.Customers.find_or_create_by_cpf_cnpj(flow.cpf, %{
+              name: flow.customer_name,
+              phone: from
+            })
+          end
+
+          case Ersventaja.Atendimento.AtendimentoSupervisor.start_child(server_data) do
+            {:ok, pid} ->
+              Logger.info("[WhatsApp] Atendimento ##{atendimento.id} started | PID: #{inspect(pid)}")
+
+              # Forward the initial client message to the GenServer
+              Ersventaja.Atendimento.AtendimentoServer.client_message(pid, details_text)
+
+              # Send summary to agent
+              category_label =
+                case flow.category do
+                  "duvida" -> "Dúvida"
+                  "sinistro" -> "Notificação de Sinistro"
+                  "troca_veiculo" -> "Troca de Veículo"
+                end
+
+              MetaApi.send_text(
+                phone_number_id,
+                agent.phone,
+                "🔔 *Novo Atendimento ##{atendimento.id}*\n\n" <>
+                  "*Cliente:* #{flow.customer_name}\n" <>
+                  "*CPF/CNPJ:* #{flow.cpf}\n" <>
+                  "*Categoria:* #{category_label}\n" <>
+                  "*WhatsApp:* #{from}\n\n" <>
+                  "*Mensagem do cliente:*\n#{details_text}\n\n" <>
+                  "Responda esta mensagem para iniciar o atendimento."
+              )
+
+            {:error, {:already_started, pid}} ->
+              Logger.warning("[WhatsApp] Atendimento ##{atendimento.id} already started")
+              Ersventaja.Atendimento.AtendimentoServer.client_message(pid, details_text)
+
+            {:error, reason} ->
+              Logger.error("[WhatsApp] Failed to start atendimento GenServer: #{inspect(reason)}")
+
+              MetaApi.send_text(
+                phone_number_id,
+                from,
+                "❌ Não foi possível iniciar o atendimento. " <>
+                  "Por favor, tente novamente ou entre em contato pelo e-mail: roberto@rsventaja.com"
+              )
+          end
+
+        {:error, changeset} ->
+          Logger.error("[WhatsApp] Failed to create atendimento: #{inspect(changeset.errors)}")
+
+          MetaApi.send_text(
+            phone_number_id,
+            from,
+            "❌ Não foi possível criar o atendimento. " <>
+              "Por favor, tente novamente ou entre em contato pelo e-mail: roberto@rsventaja.com"
+          )
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Atendimento routing — text messages
+  # ---------------------------------------------------------------------------
+
+  defp is_agent_number?(from) do
+    Ersventaja.Atendimento.is_agent_number?(from)
+  end
+
+  defp has_active_atendimento?(from) do
+    Ersventaja.Atendimento.get_active_atendimento_by_phone(from) != nil
+  end
+
+  defp route_agent_text_to_atendimento(phone_number_id, from, text) do
+    case Ersventaja.Atendimento.get_active_atendimento_for_agent(from) do
+      %{id: att_id} ->
+        # Find the GenServer PID by looking up children of the supervisor
+        pid = find_atendimento_pid(att_id)
+
+        if pid do
+          # Check for end commands from agent
+          if String.downcase(String.trim(text)) in ["encerrar", "finalizar", "terminar"] do
+            Ersventaja.Atendimento.AtendimentoServer.end_by_agent(pid)
+          else
+            Ersventaja.Atendimento.AtendimentoServer.agent_message(pid, text)
+          end
+        else
+          Logger.warning("[WhatsApp] No GenServer found for atendimento ##{att_id}")
+        end
+
+      nil ->
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "Você não tem nenhum atendimento ativo no momento."
+        )
+    end
+  end
+
+  defp route_client_text_to_atendimento(phone_number_id, from, text) do
+    case Ersventaja.Atendimento.get_active_atendimento_by_phone(from) do
+      %{id: att_id} ->
+        pid = find_atendimento_pid(att_id)
+
+        if pid do
+          # Check for end command
+          if String.downcase(String.trim(text)) in ["encerrar", "finalizar", "terminar"] do
+            Ersventaja.Atendimento.AtendimentoServer.end_by_client(pid)
+          else
+            Ersventaja.Atendimento.AtendimentoServer.client_message(pid, text)
+          end
+        else
+          Logger.warning("[WhatsApp] No GenServer found for atendimento ##{att_id}")
+        end
+
+      nil ->
+        # Shouldn't happen, but handle gracefully
+        send_main_menu(phone_number_id, from)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Atendimento routing — media messages
+  # ---------------------------------------------------------------------------
+
+  defp route_agent_media_to_atendimento(phone_number_id, from, msg) do
+    case Ersventaja.Atendimento.get_active_atendimento_for_agent(from) do
+      %{id: att_id} ->
+        pid = find_atendimento_pid(att_id)
+
+        if pid do
+          media_type = msg["type"]
+          media_id = get_in(msg, [media_type, "id"])
+          mime_type = get_in(msg, [media_type, "mime_type"]) || mime_type_for(msg)
+          caption = get_in(msg, [media_type, "caption"])
+
+          Ersventaja.Atendimento.AtendimentoServer.agent_media(
+            pid, media_type, media_id, mime_type, caption
+          )
+        else
+          Logger.warning("[WhatsApp] No GenServer found for atendimento ##{att_id}")
+        end
+
+      nil ->
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "Você não tem nenhum atendimento ativo no momento."
+        )
+    end
+  end
+
+  defp route_client_media_to_atendimento(phone_number_id, from, msg) do
+    case Ersventaja.Atendimento.get_active_atendimento_by_phone(from) do
+      %{id: att_id} ->
+        pid = find_atendimento_pid(att_id)
+
+        if pid do
+          media_type = msg["type"]
+          media_id = get_in(msg, [media_type, "id"])
+          mime_type = get_in(msg, [media_type, "mime_type"]) || mime_type_for(msg)
+          caption = get_in(msg, [media_type, "caption"])
+
+          Ersventaja.Atendimento.AtendimentoServer.client_media(
+            pid, media_type, media_id, mime_type, caption
+          )
+        else
+          Logger.warning("[WhatsApp] No GenServer found for atendimento ##{att_id}")
+        end
+
+      nil ->
+        send_main_menu(phone_number_id, from)
+    end
+  end
+
+  defp mime_type_for(%{"type" => "image"}), do: "image/jpeg"
+  defp mime_type_for(%{"type" => "audio"}), do: "audio/ogg"
+  defp mime_type_for(%{"type" => "document"}), do: "application/pdf"
+  defp mime_type_for(_), do: "application/octet-stream"
+
+  # ---------------------------------------------------------------------------
+  # Atendimento — GenServer PID lookup
+  # ---------------------------------------------------------------------------
+
+  defp find_atendimento_pid(atendimento_id) do
+    child_id = :"atendimento_#{atendimento_id}"
+
+    Ersventaja.Atendimento.AtendimentoSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.find_value(fn
+      {^child_id, pid, :worker, _} -> pid
+      _ -> nil
+    end)
+  end
 end

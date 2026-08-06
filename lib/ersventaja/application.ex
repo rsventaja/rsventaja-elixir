@@ -19,7 +19,8 @@ defmodule Ersventaja.Application do
       {Phoenix.PubSub, name: Ersventaja.PubSub},
       # Start the Endpoint (http/https)
       ErsventajaWeb.Endpoint,
-      Ersventaja.BackupJob
+      Ersventaja.BackupJob,
+      Ersventaja.Atendimento.AtendimentoSupervisor
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

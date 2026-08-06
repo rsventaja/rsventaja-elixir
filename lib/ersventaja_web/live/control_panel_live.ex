@@ -9,6 +9,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
   alias Ersventaja.Segfy.Quotation, as: SegfyQuotation
   alias Ersventaja.Segfy.Models.SegfyQuotation, as: SegfyQuotationModel
   alias Ersventaja.UserManager.Guardian
+  alias Ersventaja.Atendimento
 
   @impl true
   def mount(_params, session, socket) do
@@ -68,6 +69,13 @@ defmodule ErsventajaWeb.ControlPanelLive do
           |> assign(segfy_premiums_preview: nil)
           |> assign(segfy_quotation_url: nil)
           |> assign(segfy_enabled: Ersventaja.Segfy.enabled?())
+          |> assign(atendimento_agents: [])
+          |> assign(new_agent_name: "")
+          |> assign(new_agent_phone: "")
+          |> assign(atendimentos: [])
+          |> assign(atendimento_filter: "active")
+          |> assign(selected_atendimento: nil)
+          |> assign(atendimento_messages: [])
           |> allow_upload(:file,
             accept: ~w(.pdf),
             max_entries: 1,
@@ -98,6 +106,18 @@ defmodule ErsventajaWeb.ControlPanelLive do
         socket
       end
 
+    # Load atendimento data when switching to atendimento tab
+    socket =
+      if tab == "atendimento" do
+        assign(socket,
+          atendimento_agents: Atendimento.list_agents(),
+          atendimentos: Atendimento.list_atendimentos("active"),
+          atendimento_filter: "active"
+        )
+      else
+        socket
+      end
+
     # Set default sort for each tab
     default_sort =
       case tab do
@@ -106,6 +126,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
         "all" -> %{sort_by: "customer_name", sort_dir: "asc"}
         "insurers" -> %{sort_by: "name", sort_dir: "asc"}
         "clients" -> %{sort_by: "end_date", sort_dir: "asc"}
+        "atendimento" -> %{sort_by: "started_at", sort_dir: "desc"}
         _ -> %{sort_by: "end_date", sort_dir: "asc"}
       end
 
@@ -814,6 +835,91 @@ defmodule ErsventajaWeb.ControlPanelLive do
     require Logger
     Logger.info("check_upload_complete event received")
     check_and_process_uploads(socket)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Atendimento handlers
+  # ---------------------------------------------------------------------------
+
+  @impl true
+  def handle_event("create_agent", %{"name" => name, "phone" => phone}, socket) do
+    if String.trim(name) != "" && String.trim(phone) != "" do
+      case Atendimento.create_agent(%{name: name, phone: phone}) do
+        {:ok, _agent} ->
+          agents = Atendimento.list_agents()
+
+          {:noreply,
+           socket
+           |> put_flash(:success, "Agente adicionado com sucesso!")
+           |> assign(atendimento_agents: agents, new_agent_name: "", new_agent_phone: "")}
+
+        {:error, changeset} ->
+          errors = changeset.errors |> Enum.map(fn {k, {msg, _}} -> "#{k}: #{msg}" end) |> Enum.join(", ")
+
+          {:noreply,
+           socket
+           |> put_flash(:error, "Erro ao adicionar agente: #{errors}")}
+      end
+    else
+      {:noreply,
+       socket
+       |> put_flash(:error, "Nome e telefone são obrigatórios.")}
+    end
+  end
+
+  @impl true
+  def handle_event("update_agent_name", %{"name" => name}, socket) do
+    {:noreply, assign(socket, new_agent_name: name)}
+  end
+
+  @impl true
+  def handle_event("update_agent_phone", %{"phone" => phone}, socket) do
+    {:noreply, assign(socket, new_agent_phone: phone)}
+  end
+
+  @impl true
+  def handle_event("delete_agent", %{"id" => id}, socket) do
+    try do
+      agent = Atendimento.get_agent!(String.to_integer(id))
+      Atendimento.delete_agent(agent)
+      agents = Atendimento.list_agents()
+
+      {:noreply,
+       socket
+       |> put_flash(:success, "Agente removido com sucesso!")
+       |> assign(atendimento_agents: agents)}
+    rescue
+      _ ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Erro ao remover agente.")}
+    end
+  end
+
+  @impl true
+  def handle_event("filter_atendimentos", %{"filter" => filter}, socket) do
+    atendimentos = Atendimento.list_atendimentos(filter)
+
+    {:noreply,
+     socket
+     |> assign(atendimento_filter: filter, atendimentos: atendimentos, selected_atendimento: nil, atendimento_messages: [])}
+  end
+
+  @impl true
+  def handle_event("view_atendimento", %{"id" => id}, socket) do
+    atendimento = Atendimento.get_atendimento_with_relations(String.to_integer(id))
+    messages = Atendimento.get_messages(String.to_integer(id))
+
+    {:noreply,
+     socket
+     |> assign(selected_atendimento: atendimento, atendimento_messages: messages)}
+  end
+
+  @impl true
+  def handle_event("close_atendimento", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(selected_atendimento: nil, atendimento_messages: [])}
   end
 
   # Private helper functions
@@ -1936,8 +2042,6 @@ defmodule ErsventajaWeb.ControlPanelLive do
               <i class="fas fa-user-circle"></i> Clientes
             </button>
 
-            <span class="tab-divider"></span>
-
             <button
               phx-click="switch_tab" phx-value-tab="all"
               class={"tab-button #{if @active_tab == "all", do: "active", else: ""}"}
@@ -1953,6 +2057,13 @@ defmodule ErsventajaWeb.ControlPanelLive do
               class={"tab-button #{if @active_tab == "register", do: "active", else: ""}"}
             >
               <i class="fas fa-plus-circle"></i> Nova Apólice
+            </button>
+
+            <button
+              phx-click="switch_tab" phx-value-tab="atendimento"
+              class={"tab-button #{if @active_tab == "atendimento", do: "active", else: ""}"}
+            >
+              <i class="fas fa-headset"></i> Atendimento
             </button>
 
             <%# ── Configurações (direita) ── %>
@@ -3192,6 +3303,257 @@ defmodule ErsventajaWeb.ControlPanelLive do
               </div>
             </div>
 
+          </div>
+        <% end %>
+
+        <%= if @active_tab == "atendimento" do %>
+          <div class="table-container">
+            <h3 style="margin-top: 0; margin-bottom: 0.75em; font-size: 18px; font-weight: 600; color: #374151;">
+              <i class="fas fa-user-tie" style="margin-right: 0.4em;"></i> Agentes de Atendimento
+            </h3>
+            <p style="margin-bottom: 1em; font-size: 14px; color: #64748b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+              Cadastre os números de WhatsApp dos atendentes que receberão os atendimentos.
+            </p>
+
+            <%# ── Add agent form ── %>
+            <form phx-submit="create_agent" phx-change="noop" style="margin-bottom: 1.5em;">
+              <div class="insurer-form-row" style="display: flex; gap: 1em; align-items: flex-end; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 180px;">
+                  <label style="font-size: 13px; font-weight: 600; color: #64748b; display: block; margin-bottom: 4px;">Nome</label>
+                  <input type="text" name="name" value={@new_agent_name} class="form-input" placeholder="Nome do atendente" style="height: 40px !important; padding: 8px 12px !important;" phx-change="update_agent_name" />
+                </div>
+                <div style="flex: 1; min-width: 180px;">
+                  <label style="font-size: 13px; font-weight: 600; color: #64748b; display: block; margin-bottom: 4px;">Telefone WhatsApp</label>
+                  <input type="text" name="phone" value={@new_agent_phone} class="form-input mask-phone" placeholder="(00) 00000-0000" maxlength="15" phx-hook="MaskPhone" id="agent-phone" style="height: 40px !important; padding: 8px 12px !important;" phx-change="update_agent_phone" />
+                </div>
+                <button type="submit" class="btn-primary" style="height: 40px; white-space: nowrap; padding: 0 20px;">
+                  <i class="fas fa-plus"></i> Adicionar
+                </button>
+              </div>
+            </form>
+
+            <%# ── Agents table ── %>
+            <%= if length(@atendimento_agents) > 0 do %>
+              <table style="width: 100%; border-collapse: collapse; margin-bottom: 2em;">
+                <thead>
+                  <tr>
+                    <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Nome</th>
+                    <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Telefone</th>
+                    <th style="padding: 0.75em; text-align: center; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb; width: 80px;">Ações</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <%= for agent <- @atendimento_agents do %>
+                    <tr id={"agent-row-#{agent.id}"} style="border-bottom: 1px solid #f3f4f6;">
+                      <td style="padding: 0.75em; font-size: 15px; color: #374151;"><%= agent.name %></td>
+                      <td style="padding: 0.75em; font-size: 15px; color: #374151;"><%= agent.phone %></td>
+                      <td style="padding: 0.75em; text-align: center;">
+                        <button
+                          phx-click="delete_agent"
+                          phx-value-id={agent.id}
+                          class="btn-danger"
+                          style="padding: 6px 12px; font-size: 13px;"
+                          data-confirm={"Remover agente #{agent.name}?"}
+                        >
+                          <i class="fas fa-trash"></i>
+                        </button>
+                      </td>
+                    </tr>
+                  <% end %>
+                </tbody>
+              </table>
+            <% else %>
+              <div style="text-align: center; padding: 2em; color: #94a3b8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+                <i class="fas fa-user-slash" style="font-size: 32px; display: block; margin-bottom: 0.5em;"></i>
+                Nenhum agente cadastrado. Adicione pelo menos um para receber atendimentos.
+              </div>
+            <% end %>
+
+            <%# ── Atendimentos section ── %>
+            <h3 style="margin-top: 1.5em; margin-bottom: 0.75em; font-size: 18px; font-weight: 600; color: #374151;">
+              <i class="fas fa-concierge-bell" style="margin-right: 0.4em;"></i> Atendimentos
+            </h3>
+
+            <%# ── Filter buttons ── %>
+            <div style="display: flex; gap: 0.5em; margin-bottom: 1em; flex-wrap: wrap;">
+              <button
+                phx-click="filter_atendimentos" phx-value-filter="active"
+                class={"btn-primary" <> if @atendimento_filter == "active", do: "", else: " btn-secondary"}
+                style={"padding: 6px 16px; font-size: 13px;"}
+              >
+                Ativos
+              </button>
+              <button
+                phx-click="filter_atendimentos" phx-value-filter="ended"
+                class={"btn-primary" <> if @atendimento_filter == "ended", do: "", else: " btn-secondary"}
+                style={"padding: 6px 16px; font-size: 13px;"}
+              >
+                Finalizados
+              </button>
+              <button
+                phx-click="filter_atendimentos" phx-value-filter="expired"
+                class={"btn-primary" <> if @atendimento_filter == "expired", do: "", else: " btn-secondary"}
+                style={"padding: 6px 16px; font-size: 13px;"}
+              >
+                Expirados
+              </button>
+            </div>
+
+            <%= if @selected_atendimento do %>
+              <%# ── Atendimento detail ── %>
+              <div style="margin-bottom: 1em;">
+                <button phx-click="close_atendimento" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 0.5em; padding: 8px 16px; font-size: 14px;">
+                  <i class="fas fa-arrow-left"></i> Voltar
+                </button>
+              </div>
+
+              <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.25em; margin-bottom: 1.5em;">
+                <div style="display: flex; flex-wrap: wrap; gap: 1em; font-size: 14px;">
+                  <div style="min-width: 150px;">
+                    <strong style="color: #64748b; font-size: 12px;">Cliente</strong>
+                    <br/><span style="color: #374151;"><%= @selected_atendimento.customer_name || "—" %></span>
+                  </div>
+                  <div style="min-width: 150px;">
+                    <strong style="color: #64748b; font-size: 12px;">CPF/CNPJ</strong>
+                    <br/><span style="color: #374151;"><%= @selected_atendimento.cpf_cnpj %></span>
+                  </div>
+                  <div style="min-width: 120px;">
+                    <strong style="color: #64748b; font-size: 12px;">Categoria</strong>
+                    <br/>
+                    <%= case @selected_atendimento.category do %>
+                      <% "duvida" -> %>
+                        <span style="background: #dbeafe; color: #1e40af; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Dúvida</span>
+                      <% "sinistro" -> %>
+                        <span style="background: #fee2e2; color: #991b1b; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Sinistro</span>
+                      <% "troca_veiculo" -> %>
+                        <span style="background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Troca de Veículo</span>
+                    <% end %>
+                  </div>
+                  <div style="min-width: 100px;">
+                    <strong style="color: #64748b; font-size: 12px;">Status</strong>
+                    <br/>
+                    <%= case @selected_atendimento.status do %>
+                      <% "active" -> %>
+                        <span style="background: #d1fae5; color: #065f46; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Ativo</span>
+                      <% "ended" -> %>
+                        <span style="background: #e2e8f0; color: #475569; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Finalizado</span>
+                      <% "expired" -> %>
+                        <span style="background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Expirado</span>
+                    <% end %>
+                  </div>
+                  <%= if @selected_atendimento.agent do %>
+                    <div style="min-width: 150px;">
+                      <strong style="color: #64748b; font-size: 12px;">Atendente</strong>
+                      <br/><span style="color: #374151;"><%= @selected_atendimento.agent.name %></span>
+                    </div>
+                  <% end %>
+                </div>
+              </div>
+
+              <%# ── Message timeline ── %>
+              <div style="max-height: 500px; overflow-y: auto; padding: 0.5em;">
+                <%= if length(@atendimento_messages) > 0 do %>
+                  <%= for msg <- @atendimento_messages do %>
+                    <% is_client = msg.sender_type == "client" %>
+                    <% is_system = msg.sender_type == "system" %>
+                    <div style={"display: flex; margin-bottom: 0.75em; " <> if is_client, do: "justify-content: flex-start;", else: "justify-content: flex-end;"}>
+                      <div style={
+                        "max-width: 75%; padding: 0.75em 1em; border-radius: 12px; font-size: 14px; " <>
+                        cond do
+                          is_system -> "background: #f1f5f9; color: #64748b; text-align: center; margin: 0.5em auto; font-size: 12px;"
+                          is_client -> "background: #d1fae5; color: #065f46; border-bottom-left-radius: 4px;"
+                          true -> "background: #dbeafe; color: #1e40af; border-bottom-right-radius: 4px;"
+                        end
+                      }>
+                        <%= if !is_system do %>
+                          <div style="font-size: 11px; font-weight: 600; margin-bottom: 4px; opacity: 0.7;">
+                            <%= if is_client, do: "👤 Cliente", else: "🎧 Atendente" %>
+                          </div>
+                        <% end %>
+                        <div>
+                          <%= if msg.content_type == "text" do %>
+                            <%= msg.content %>
+                          <% else %>
+                            <div style="display: flex; align-items: center; gap: 0.5em;">
+                              <i class="fas fa-paperclip"></i>
+                              [<%= String.upcase(msg.content_type) %>]
+                              <%= if msg.content && msg.content != "", do: msg.content %>
+                            </div>
+                          <% end %>
+                        </div>
+                        <div style="font-size: 10px; margin-top: 4px; opacity: 0.5;">
+                          <%= msg.inserted_at |> NaiveDateTime.to_string() |> String.slice(11..15) %>
+                        </div>
+                      </div>
+                    </div>
+                  <% end %>
+                <% else %>
+                  <p style="text-align: center; color: #94a3b8; padding: 2em;">Nenhuma mensagem neste atendimento.</p>
+                <% end %>
+              </div>
+            <% else %>
+              <%# ── Atendimentos table ── %>
+              <%= if length(@atendimentos) > 0 do %>
+                <div class="responsive-table">
+                  <table style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                      <tr>
+                        <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Data</th>
+                        <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Cliente</th>
+                        <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Categoria</th>
+                        <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Status</th>
+                        <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Atendente</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <%= for att <- @atendimentos do %>
+                        <tr
+                          id={"att-row-#{att.id}"}
+                          phx-click="view_atendimento" phx-value-id={att.id}
+                          class="hover-row" style="cursor: pointer;"
+                        >
+                          <td style="padding: 0.75em; font-size: 14px; color: #374151;">
+                            <%= if att.started_at, do: Calendar.strftime(att.started_at, "%d/%m/%Y %H:%M") %>
+                          </td>
+                          <td style="padding: 0.75em; font-size: 14px; color: #374151;">
+                            <%= att.customer_name || "—" %>
+                            <div style="font-size: 11px; color: #94a3b8;"><%= att.cpf_cnpj %></div>
+                          </td>
+                          <td style="padding: 0.75em;">
+                            <%= case att.category do %>
+                              <% "duvida" -> %>
+                                <span style="background: #dbeafe; color: #1e40af; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Dúvida</span>
+                              <% "sinistro" -> %>
+                                <span style="background: #fee2e2; color: #991b1b; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Sinistro</span>
+                              <% "troca_veiculo" -> %>
+                                <span style="background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Troca de Veículo</span>
+                            <% end %>
+                          </td>
+                          <td style="padding: 0.75em;">
+                            <%= case att.status do %>
+                              <% "active" -> %>
+                                <span style="background: #d1fae5; color: #065f46; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Ativo</span>
+                              <% "ended" -> %>
+                                <span style="background: #e2e8f0; color: #475569; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Finalizado</span>
+                              <% "expired" -> %>
+                                <span style="background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 4px; font-size: 13px; font-weight: 500;">Expirado</span>
+                            <% end %>
+                          </td>
+                          <td style="padding: 0.75em; font-size: 14px; color: #374151;">
+                            <%= if att.agent, do: att.agent.name, else: "—" %>
+                          </td>
+                        </tr>
+                      <% end %>
+                    </tbody>
+                  </table>
+                </div>
+              <% else %>
+                <div style="text-align: center; padding: 3em; color: #94a3b8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+                  <i class="fas fa-inbox" style="font-size: 40px; display: block; margin-bottom: 0.5em;"></i>
+                  Nenhum atendimento encontrado para este filtro.
+                </div>
+              <% end %>
+            <% end %>
           </div>
         <% end %>
 

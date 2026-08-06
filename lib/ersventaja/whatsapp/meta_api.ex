@@ -241,6 +241,85 @@ defmodule Ersventaja.Whatsapp.MetaApi do
   end
 
   # ---------------------------------------------------------------------------
+  # Media download
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Downloads binary media from WhatsApp by its media ID.
+
+  Returns `{:ok, binary}` with the raw file contents, or `{:error, reason}`.
+  """
+  def download_media(media_id) do
+    access_token = get_access_token()
+    if is_nil(access_token), do: {:error, :no_token}
+
+    url = "#{@base_url}/#{media_id}"
+
+    headers = [
+      {"Authorization", "Bearer #{access_token}"}
+    ]
+
+    case :hackney.get(url, headers, "", [:with_body]) do
+      {:ok, status, _headers, resp_body} when status in 200..299 ->
+        Logger.info("[WhatsApp] Media downloaded OK, id: #{media_id}, size: #{byte_size(resp_body)}")
+        {:ok, resp_body}
+
+      {:ok, status, _headers, resp_body} ->
+        Logger.warning("[WhatsApp] Media download failed HTTP #{status}: #{inspect(resp_body)}")
+        {:error, {:http, status, resp_body}}
+
+      {:error, reason} ->
+        Logger.warning("[WhatsApp] Media download failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Image by media ID
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Sends an image to a WhatsApp user using a previously uploaded media ID.
+
+  Options: `:caption` (string)
+  """
+  def send_image_by_media_id(phone_number_id, to_wa_id, media_id, opts \\ []) do
+    caption = Keyword.get(opts, :caption)
+
+    image = %{id: media_id}
+    image = if caption, do: Map.put(image, :caption, caption), else: image
+
+    payload = %{
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: sanitize_phone(to_wa_id),
+      type: "image",
+      image: image
+    }
+
+    post_message(phone_number_id, payload)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Audio by media ID
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Sends an audio message to a WhatsApp user using a previously uploaded media ID.
+  """
+  def send_audio_by_media_id(phone_number_id, to_wa_id, media_id) do
+    payload = %{
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: sanitize_phone(to_wa_id),
+      type: "audio",
+      audio: %{id: media_id}
+    }
+
+    post_message(phone_number_id, payload)
+  end
+
+  # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
 
