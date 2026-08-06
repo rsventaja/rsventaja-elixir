@@ -116,10 +116,13 @@ defmodule Ersventaja.WhatsappBot do
     end
   end
 
-  defp handle_message(phone_number_id, %{
-         "from" => from,
-         "type" => type
-       } = msg)
+  defp handle_message(
+         phone_number_id,
+         %{
+           "from" => from,
+           "type" => type
+         } = msg
+       )
        when type in ["image", "audio", "document"] do
     # Media messages — route to atendimento if active
     cond do
@@ -274,7 +277,11 @@ defmodule Ersventaja.WhatsappBot do
         rows: [
           %{id: @list_id_apolice, title: "📋 Baixar apólice", description: "Informe seu CPF/CNPJ"},
           %{id: @list_id_contato, title: "📞 Contato", description: "Fale com a corretora"},
-          %{id: @list_id_atendimento, title: "🎫 Atendimento", description: "Fale com um atendente"},
+          %{
+            id: @list_id_atendimento,
+            title: "🎫 Atendimento",
+            description: "Fale com um atendente"
+          },
           %{
             id: @list_id_revogar,
             title: "🔒 Revogar LGPD",
@@ -717,9 +724,10 @@ defmodule Ersventaja.WhatsappBot do
   end
 
   defp send_atendimento_category_buttons(phone_number_id, from, flow) do
-    greeting = if flow.customer_name != "Cliente",
-      do: "Olá, *#{flow.customer_name}*! ",
-      else: ""
+    greeting =
+      if flow.customer_name != "Cliente",
+        do: "Olá, *#{flow.customer_name}*! ",
+        else: ""
 
     MetaApi.send_interactive_buttons(
       phone_number_id,
@@ -791,14 +799,14 @@ defmodule Ersventaja.WhatsappBot do
     else
       # Create atendimento in DB
       case Ersventaja.Atendimento.create_atendimento(%{
-        whatsapp_phone: from,
-        cpf_cnpj: flow.cpf,
-        customer_name: flow.customer_name,
-        category: flow.category,
-        status: "active",
-        started_at: DateTime.utc_now(),
-        agent_id: agent.id
-      }) do
+             whatsapp_phone: from,
+             cpf_cnpj: flow.cpf,
+             customer_name: flow.customer_name,
+             category: flow.category,
+             status: "active",
+             started_at: DateTime.utc_now(),
+             agent_id: agent.id
+           }) do
         {:ok, atendimento} ->
           # Start GenServer
           server_data = %{
@@ -821,7 +829,9 @@ defmodule Ersventaja.WhatsappBot do
 
           case Ersventaja.Atendimento.AtendimentoSupervisor.start_child(server_data) do
             {:ok, pid} ->
-              Logger.info("[WhatsApp] Atendimento ##{atendimento.id} started | PID: #{inspect(pid)}")
+              Logger.info(
+                "[WhatsApp] Atendimento ##{atendimento.id} started | PID: #{inspect(pid)}"
+              )
 
               # Forward the initial client message to the GenServer
               Ersventaja.Atendimento.AtendimentoServer.client_message(pid, details_text)
@@ -950,7 +960,11 @@ defmodule Ersventaja.WhatsappBot do
           caption = get_in(msg, [media_type, "caption"])
 
           Ersventaja.Atendimento.AtendimentoServer.agent_media(
-            pid, media_type, media_id, mime_type, caption
+            pid,
+            media_type,
+            media_id,
+            mime_type,
+            caption
           )
         else
           Logger.warning("[WhatsApp] No GenServer found for atendimento ##{att_id}")
@@ -977,7 +991,11 @@ defmodule Ersventaja.WhatsappBot do
           caption = get_in(msg, [media_type, "caption"])
 
           Ersventaja.Atendimento.AtendimentoServer.client_media(
-            pid, media_type, media_id, mime_type, caption
+            pid,
+            media_type,
+            media_id,
+            mime_type,
+            caption
           )
         else
           Logger.warning("[WhatsApp] No GenServer found for atendimento ##{att_id}")

@@ -23,15 +23,15 @@ defmodule Ersventaja.Atendimento.Models.AtendimentoMessage do
   )a
 
   schema "atendimento_messages" do
-    belongs_to :atendimento, Atendimento
+    belongs_to(:atendimento, Atendimento)
 
-    field :direction, :string
-    field :sender_type, :string
-    field :content_type, :string
-    field :content, :string
-    field :whatsapp_phone, :string
-    field :media_id, :string
-    field :mime_type, :string
+    field(:direction, :string)
+    field(:sender_type, :string)
+    field(:content_type, :string)
+    field(:content, :string)
+    field(:whatsapp_phone, :string)
+    field(:media_id, :string)
+    field(:mime_type, :string)
 
     timestamps()
   end

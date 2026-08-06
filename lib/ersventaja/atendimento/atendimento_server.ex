@@ -126,7 +126,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       timer_ref: timer_ref
     }
 
-    Logger.info("[Atendimento] ##{atendimento_id} iniciado | Cliente: #{client_phone} | Agente: #{agent_phone}")
+    Logger.info(
+      "[Atendimento] ##{atendimento_id} iniciado | Cliente: #{client_phone} | Agente: #{agent_phone}"
+    )
 
     {:ok, state}
   end
@@ -151,7 +153,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       # Encaminha para o atendente
       MetaApi.send_text(state.phone_number_id, state.agent_phone, text)
 
-      Logger.info("[Atendimento] ##{state.atendimento_id} Cliente → Atendente: #{String.slice(text, 0, 100)}")
+      Logger.info(
+        "[Atendimento] ##{state.atendimento_id} Cliente → Atendente: #{String.slice(text, 0, 100)}"
+      )
     end
 
     {:noreply, reset_timer(state)}
@@ -173,7 +177,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       # Encaminha para o cliente
       MetaApi.send_text(state.phone_number_id, state.client_phone, text)
 
-      Logger.info("[Atendimento] ##{state.atendimento_id} Atendente → Cliente: #{String.slice(text, 0, 100)}")
+      Logger.info(
+        "[Atendimento] ##{state.atendimento_id} Atendente → Cliente: #{String.slice(text, 0, 100)}"
+      )
     end
 
     {:noreply, reset_timer(state)}
@@ -201,7 +207,14 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       })
 
       # Encaminha mídia para o atendente
-      forward_media(state.phone_number_id, state.agent_phone, media_type, media_id, mime_type, caption)
+      forward_media(
+        state.phone_number_id,
+        state.agent_phone,
+        media_type,
+        media_id,
+        mime_type,
+        caption
+      )
 
       Logger.info("[Atendimento] ##{state.atendimento_id} Cliente → Atendente: #{content_label}")
     end
@@ -227,7 +240,14 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       })
 
       # Encaminha mídia para o cliente
-      forward_media(state.phone_number_id, state.client_phone, media_type, media_id, mime_type, caption)
+      forward_media(
+        state.phone_number_id,
+        state.client_phone,
+        media_type,
+        media_id,
+        mime_type,
+        caption
+      )
 
       Logger.info("[Atendimento] ##{state.atendimento_id} Atendente → Cliente: #{content_label}")
     end
@@ -241,12 +261,20 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
 
   @impl true
   def handle_cast(:end_by_client, state) do
-    end_atendimento(state, "client", "👋 *Atendimento encerrado pelo cliente.* Obrigado por nos contatar!")
+    end_atendimento(
+      state,
+      "client",
+      "👋 *Atendimento encerrado pelo cliente.* Obrigado por nos contatar!"
+    )
   end
 
   @impl true
   def handle_cast(:end_by_agent, state) do
-    end_atendimento(state, "agent", "👋 *Atendimento encerrado pelo atendente.* Obrigado por nos contatar!")
+    end_atendimento(
+      state,
+      "agent",
+      "👋 *Atendimento encerrado pelo atendente.* Obrigado por nos contatar!"
+    )
   end
 
   # ---------------------------------------------------------------------------
@@ -255,7 +283,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
 
   @impl true
   def handle_info(:timeout, state) do
-    end_atendimento(state, "timeout",
+    end_atendimento(
+      state,
+      "timeout",
       "⏰ *Atendimento encerrado por inatividade.* Se precisar de mais ajuda, inicie um novo atendimento."
     )
   end
@@ -293,9 +323,11 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       MetaApi.send_text(state.phone_number_id, state.client_phone, message)
 
       if ended_by != "agent" do
-        MetaApi.send_text(state.phone_number_id, state.agent_phone,
+        MetaApi.send_text(
+          state.phone_number_id,
+          state.agent_phone,
           "👋 *Atendimento ##{state.atendimento_id} encerrado.* " <>
-          "Motivo: #{humanize_ended_by(ended_by)}."
+            "Motivo: #{humanize_ended_by(ended_by)}."
         )
       end
 
@@ -335,7 +367,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
         MetaApi.send_audio_by_media_id(phone_number_id, to_phone, media_id)
 
       _ ->
-        MetaApi.send_text(phone_number_id, to_phone,
+        MetaApi.send_text(
+          phone_number_id,
+          to_phone,
           "[#{String.upcase(media_type)}] #{caption_str}"
         )
     end

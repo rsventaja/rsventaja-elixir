@@ -77,7 +77,21 @@ defmodule Ersventaja.Atendimento do
   Verifica se um número de telefone pertence a um agente cadastrado.
   """
   def is_agent_number?(phone) when is_binary(phone) do
-    Repo.exists?(from(a in AtendimentoAgent, where: a.phone == ^phone))
+    digits = normalize_phone_digits(phone)
+
+    if digits == "" do
+      false
+    else
+      Repo.exists?(
+        from(a in AtendimentoAgent,
+          where:
+            fragment(
+              "regexp_replace(?, '[^0-9]', '', 'g')",
+              a.phone
+            ) == ^digits
+        )
+      )
+    end
   end
 
   def is_agent_number?(_), do: false
@@ -129,15 +143,26 @@ defmodule Ersventaja.Atendimento do
   Retorna nil se não houver.
   """
   def get_active_atendimento_for_agent(agent_phone) do
-    from(a in Atendimento,
-      join: ag in AtendimentoAgent, on: a.agent_id == ag.id,
-      where: ag.phone == ^agent_phone,
-      where: a.status == "active",
-      order_by: [desc: a.started_at],
-      limit: 1
-    )
-    |> Repo.one()
-    |> Repo.preload([:agent, :customer])
+    digits = normalize_phone_digits(agent_phone)
+
+    if digits == "" do
+      nil
+    else
+      from(a in Atendimento,
+        join: ag in AtendimentoAgent,
+        on: a.agent_id == ag.id,
+        where:
+          fragment(
+            "regexp_replace(?, '[^0-9]', '', 'g')",
+            ag.phone
+          ) == ^digits,
+        where: a.status == "active",
+        order_by: [desc: a.started_at],
+        limit: 1
+      )
+      |> Repo.one()
+      |> Repo.preload([:agent, :customer])
+    end
   end
 
   @doc """
@@ -194,4 +219,34 @@ defmodule Ersventaja.Atendimento do
     )
     |> Repo.all()
   end
+
+  # ---------------------------------------------------------------------------
+  # Helpers
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Normaliza um número de telefone para apenas dígitos, removendo código
+  de país 55 se presente (WhatsApp envia E.164, mas armazenamos nacional).
+
+  ## Exemplos
+
+      iex> normalize_phone_digits("5511999990001")
+      "11999990001"
+
+      iex> normalize_phone_digits("(11) 99999-0001")
+      "11999990001"
+
+  """
+  def normalize_phone_digits(phone) when is_binary(phone) do
+    digits = String.replace(phone, ~r/[^0-9]/, "")
+
+    # Remove country code 55 prefix when ≥12 digits (55 + DDD + number)
+    if String.length(digits) >= 12 and String.starts_with?(digits, "55") do
+      String.slice(digits, 2..-1//1)
+    else
+      digits
+    end
+  end
+
+  def normalize_phone_digits(_), do: ""
 end

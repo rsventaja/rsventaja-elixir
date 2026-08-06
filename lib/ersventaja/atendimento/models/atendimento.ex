@@ -28,18 +28,18 @@ defmodule Ersventaja.Atendimento.Models.Atendimento do
   )a
 
   schema "atendimentos" do
-    belongs_to :customer, Customer
-    belongs_to :agent, AtendimentoAgent
-    has_many :messages, AtendimentoMessage
+    belongs_to(:customer, Customer)
+    belongs_to(:agent, AtendimentoAgent)
+    has_many(:messages, AtendimentoMessage)
 
-    field :whatsapp_phone, :string
-    field :cpf_cnpj, :string
-    field :category, :string
-    field :status, :string, default: "active"
-    field :customer_name, :string
-    field :started_at, :utc_datetime
-    field :ended_at, :utc_datetime
-    field :ended_by, :string
+    field(:whatsapp_phone, :string)
+    field(:cpf_cnpj, :string)
+    field(:category, :string)
+    field(:status, :string, default: "active")
+    field(:customer_name, :string)
+    field(:started_at, :utc_datetime)
+    field(:ended_at, :utc_datetime)
+    field(:ended_by, :string)
 
     timestamps()
   end

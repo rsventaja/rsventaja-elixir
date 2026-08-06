@@ -36,14 +36,16 @@ defmodule Ersventaja.BackupJob do
     {:noreply, state}
   end
 
-  defp generate_row(%Policy{
-         calculated: calculated,
-         detail: detail,
-         end_date: end_date,
-         id: id,
-         insurer_id: insurer_id,
-         start_date: start_date
-       } = policy) do
+  defp generate_row(
+         %Policy{
+           calculated: calculated,
+           detail: detail,
+           end_date: end_date,
+           id: id,
+           insurer_id: insurer_id,
+           start_date: start_date
+         } = policy
+       ) do
     customer_name =
       case policy.customer do
         %{name: name} -> name

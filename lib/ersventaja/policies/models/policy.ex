@@ -2,8 +2,7 @@ defmodule Ersventaja.Policies.Models.Policy do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @derive {Jason.Encoder,
-           only: [:id, :detail, :start_date, :end_date, :calculated, :customer_id]}
+  @derive {Jason.Encoder, only: [:id, :detail, :start_date, :end_date, :calculated, :customer_id]}
 
   alias Ersventaja.Policies.Models.Insurer
   alias Ersventaja.Policies.Models.InsuranceType

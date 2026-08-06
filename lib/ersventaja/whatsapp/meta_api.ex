@@ -261,7 +261,10 @@ defmodule Ersventaja.Whatsapp.MetaApi do
 
     case :hackney.get(url, headers, "", [:with_body]) do
       {:ok, status, _headers, resp_body} when status in 200..299 ->
-        Logger.info("[WhatsApp] Media downloaded OK, id: #{media_id}, size: #{byte_size(resp_body)}")
+        Logger.info(
+          "[WhatsApp] Media downloaded OK, id: #{media_id}, size: #{byte_size(resp_body)}"
+        )
+
         {:ok, resp_body}
 
       {:ok, status, _headers, resp_body} ->

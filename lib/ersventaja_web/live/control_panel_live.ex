@@ -258,10 +258,16 @@ defmodule ErsventajaWeb.ControlPanelLive do
           customer_id: updated_customer.id,
           cpf_cnpj: updated_customer.cpf_cnpj,
           name: updated_customer.name,
-          phones: if(updated_customer.phone && updated_customer.phone != "",
-            do: [updated_customer.phone], else: []),
-          emails: if(updated_customer.email && updated_customer.email != "",
-            do: [updated_customer.email], else: []),
+          phones:
+            if(updated_customer.phone && updated_customer.phone != "",
+              do: [updated_customer.phone],
+              else: []
+            ),
+          emails:
+            if(updated_customer.email && updated_customer.email != "",
+              do: [updated_customer.email],
+              else: []
+            ),
           policies: client.policies
         }
 
@@ -854,7 +860,10 @@ defmodule ErsventajaWeb.ControlPanelLive do
            |> assign(atendimento_agents: agents, new_agent_name: "", new_agent_phone: "")}
 
         {:error, changeset} ->
-          errors = changeset.errors |> Enum.map(fn {k, {msg, _}} -> "#{k}: #{msg}" end) |> Enum.join(", ")
+          errors =
+            changeset.errors
+            |> Enum.map(fn {k, {msg, _}} -> "#{k}: #{msg}" end)
+            |> Enum.join(", ")
 
           {:noreply,
            socket
@@ -902,7 +911,12 @@ defmodule ErsventajaWeb.ControlPanelLive do
 
     {:noreply,
      socket
-     |> assign(atendimento_filter: filter, atendimentos: atendimentos, selected_atendimento: nil, atendimento_messages: [])}
+     |> assign(
+       atendimento_filter: filter,
+       atendimentos: atendimentos,
+       selected_atendimento: nil,
+       atendimento_messages: []
+     )}
   end
 
   @impl true
@@ -1593,7 +1607,8 @@ defmodule ErsventajaWeb.ControlPanelLive do
     uniq = fn list -> list |> Enum.reject(&(is_nil(&1) or &1 == "")) |> Enum.uniq() end
 
     %{
-      customer_id: policies |> Enum.map(& &1[:customer_id]) |> Enum.reject(&is_nil/1) |> List.first(),
+      customer_id:
+        policies |> Enum.map(& &1[:customer_id]) |> Enum.reject(&is_nil/1) |> List.first(),
       cpf_cnpj: policies |> Enum.map(& &1.customer_cpf_or_cnpj) |> uniq.() |> List.first(),
       name: policies |> Enum.map(& &1.customer_name) |> uniq.() |> List.first() || "—",
       phones: policies |> Enum.map(& &1.customer_phone) |> uniq.(),

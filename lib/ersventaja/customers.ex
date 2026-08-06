@@ -20,7 +20,8 @@ defmodule Ersventaja.Customers do
       iex> find_or_create_by_cpf_cnpj("123.456.789-00", %{name: "FULANO DE TAL", phone: "(11) 99999-0000"})
       {:ok, %Customer{}}
   """
-  @spec find_or_create_by_cpf_cnpj(String.t(), map()) :: {:ok, Customer.t()} | {:error, Ecto.Changeset.t()}
+  @spec find_or_create_by_cpf_cnpj(String.t(), map()) ::
+          {:ok, Customer.t()} | {:error, Ecto.Changeset.t()}
   def find_or_create_by_cpf_cnpj(cpf_cnpj, attrs \\ %{}) do
     digits = normalize_cpf_cnpj(cpf_cnpj)
 
