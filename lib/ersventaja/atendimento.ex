@@ -12,6 +12,7 @@ defmodule Ersventaja.Atendimento do
   alias Ersventaja.Repo
 
   import Ecto.Query
+  require Logger
 
   # ---------------------------------------------------------------------------
   # Agentes (AtendimentoAgent CRUD)
@@ -249,4 +250,73 @@ defmodule Ersventaja.Atendimento do
   end
 
   def normalize_phone_digits(_), do: ""
+
+  # ---------------------------------------------------------------------------
+  # Recovery after restart
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Chamado no boot da aplicação. Recupera atendimentos ativos que ficaram
+  órfãos após um restart.
+
+  Para cada atendimento ativo:
+  - Se a última mensagem foi há mais de 10 minutos → expira
+  - Se ainda dentro da janela → recria o GenServer
+
+  Retorna uma lista de mapas com os dados para iniciar os GenServers.
+  """
+  def recover_active_atendimentos do
+    atendimentos =
+      Repo.all(from(a in Atendimento, where: a.status == "active"))
+      |> Repo.preload(:agent)
+
+    now = NaiveDateTime.utc_now()
+    phone_number_id = Application.get_env(:ersventaja, :whatsapp)[:phone_number_id] || ""
+
+    Enum.map(atendimentos, fn att ->
+      last_activity = get_last_activity_time(att.id)
+
+      inactivity_seconds =
+        if last_activity do
+          NaiveDateTime.diff(now, last_activity, :second)
+        else
+          NaiveDateTime.diff(now, att.started_at, :second)
+        end
+
+      if inactivity_seconds >= 600 do
+        # Mais de 10 min de inatividade → expira
+        end_atendimento(att, "timeout")
+
+        Logger.info(
+          "[Atendimento] ##{att.id} expired on recovery (inactive for #{inactivity_seconds}s)"
+        )
+
+        nil
+      else
+        # Ainda ativo → dados para recriar o GenServer
+        %{
+          atendimento_id: att.id,
+          client_phone: att.whatsapp_phone,
+          agent_phone: (att.agent && att.agent.phone) || "",
+          phone_number_id: phone_number_id,
+          category: att.category,
+          customer_name: att.customer_name || "Cliente",
+          cpf_cnpj: att.cpf_cnpj
+        }
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp get_last_activity_time(atendimento_id) do
+    msg =
+      from(m in AtendimentoMessage,
+        where: m.atendimento_id == ^atendimento_id,
+        order_by: [desc: m.inserted_at],
+        limit: 1
+      )
+      |> Repo.one()
+
+    if msg, do: msg.inserted_at, else: nil
+  end
 end
