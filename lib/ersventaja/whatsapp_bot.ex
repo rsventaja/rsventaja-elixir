@@ -21,6 +21,7 @@ defmodule Ersventaja.WhatsappBot do
   @list_id_produtos "produtos"
   @list_id_revogar "revogar"
   @list_id_atendimento "atendimento"
+  @list_id_menu "menu"
   @btn_id_consent_sim "consent_sim"
   @btn_id_consent_nao "consent_nao"
   @btn_id_cat_duvida "cat_duvida"
@@ -66,8 +67,27 @@ defmodule Ersventaja.WhatsappBot do
   defp process_change(%{"value" => value, "field" => "messages"}) do
     messages = value["messages"] || []
     phone_number_id = value["metadata"]["phone_number_id"]
-    Logger.info("[WhatsApp] Processing #{length(messages)} message(s)")
-    Enum.each(messages, fn msg -> handle_message(phone_number_id, msg) end)
+
+    # Filtra mensagens de remetentes bloqueados
+    active_msgs =
+      Enum.reject(messages, fn msg ->
+        from = msg["from"]
+
+        if Ersventaja.Atendimento.is_blocked?(from) do
+          Logger.info("[WhatsApp] Ignoring message from blocked sender: #{from}")
+          true
+        else
+          false
+        end
+      end)
+
+    if active_msgs != [] do
+      Logger.info(
+        "[WhatsApp] Processing #{length(active_msgs)} message(s) (filtered #{length(messages) - length(active_msgs)} blocked)"
+      )
+
+      Enum.each(active_msgs, fn msg -> handle_message(phone_number_id, msg) end)
+    end
   end
 
   defp process_change(_), do: :ok
@@ -276,7 +296,7 @@ defmodule Ersventaja.WhatsappBot do
         title: "Menu principal",
         rows: [
           %{id: @list_id_apolice, title: "📋 Baixar apólice", description: "Informe seu CPF/CNPJ"},
-          %{id: @list_id_contato, title: "📞 Contato", description: "Fale com a corretora"},
+          %{id: @list_id_contato, title: "📧 Email", description: "roberto@rsventaja.com"},
           %{
             id: @list_id_atendimento,
             title: "🎫 Atendimento",
@@ -286,7 +306,8 @@ defmodule Ersventaja.WhatsappBot do
             id: @list_id_revogar,
             title: "🔒 Revogar LGPD",
             description: "Revogar autorização de dados"
-          }
+          },
+          %{id: @list_id_menu, title: "🔙 Voltar ao menu", description: "Ver opções novamente"}
         ]
       }
     ]
@@ -544,8 +565,8 @@ defmodule Ersventaja.WhatsappBot do
     MetaApi.send_text(
       phone_number_id,
       from,
-      "📞 *Contato RS Ventaja*\n\n" <>
-        "E-mail: roberto@rsventaja.com\n" <>
+      "📧 *Email RS Ventaja*\n\n" <>
+        "roberto@rsventaja.com\n\n" <>
         "Visite nosso site para mais informações."
     )
   end
@@ -608,8 +629,73 @@ defmodule Ersventaja.WhatsappBot do
 
   defp looks_like_cpf_cnpj(text) do
     digits = String.replace(text, ~r/[^0-9]/, "")
-    len = String.length(digits)
-    len == 11 or len == 14
+
+    cond do
+      String.length(digits) == 11 and not blocked_cpf?(digits) ->
+        valid_cpf?(digits)
+
+      String.length(digits) == 14 ->
+        valid_cnpj?(digits)
+
+      true ->
+        false
+    end
+  end
+
+  defp valid_cpf?(digits) do
+    # Rejeita sequências repetidas (111.111.111-11, etc.)
+    if String.match?(digits, ~r/^(\d)\1{10}$/) do
+      false
+    else
+      # Validação dos dígitos verificadores
+      calc_dv = fn nums, factor ->
+        sum =
+          nums
+          |> Enum.zip(Enum.to_list(factor..2))
+          |> Enum.reduce(0, fn {d, f}, acc -> acc + d * f end)
+
+        rem = rem(sum * 10, 11)
+        if rem == 10, do: 0, else: rem
+      end
+
+      nums = digits |> String.graphemes() |> Enum.map(&String.to_integer/1)
+      dv1 = calc_dv.(Enum.take(nums, 9), 10)
+      dv2 = calc_dv.(Enum.take(nums, 10), 11)
+
+      Enum.at(nums, 9) == dv1 and Enum.at(nums, 10) == dv2
+    end
+  end
+
+  defp valid_cnpj?(digits) do
+    if String.match?(digits, ~r/^(\d)\1{13}$/) do
+      false
+    else
+      calc_dv = fn nums, weights ->
+        sum =
+          nums
+          |> Enum.zip(weights)
+          |> Enum.reduce(0, fn {d, w}, acc -> acc + d * w end)
+
+        rem = rem(sum, 11)
+        if rem < 2, do: 0, else: 11 - rem
+      end
+
+      nums = digits |> String.graphemes() |> Enum.map(&String.to_integer/1)
+
+      w1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+      dv1 = calc_dv.(Enum.take(nums, 12), w1)
+
+      w2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+      dv2 = calc_dv.(Enum.take(nums, 13) ++ [dv1], w2)
+
+      Enum.at(nums, 12) == dv1 and Enum.at(nums, 13) == dv2
+    end
+  end
+
+  @blocked_cpfs ~w(12345678909)
+
+  defp blocked_cpf?(digits) do
+    digits in @blocked_cpfs
   end
 
   # ---------------------------------------------------------------------------
@@ -677,43 +763,66 @@ defmodule Ersventaja.WhatsappBot do
     MetaApi.send_text(
       phone_number_id,
       from,
-      "Para iniciar o atendimento, *informe seu CPF ou CNPJ* (apenas números ou com pontuação)."
+      "Para iniciar o atendimento, *informe seu CPF ou CNPJ* (apenas números ou com pontuação).\n\n" <>
+        "Digite *voltar* para retornar ao menu."
     )
   end
 
   defp handle_atendimento_flow_step(phone_number_id, from, text) do
-    flow = get_atendimento_flow(from)
+    # Permitir voltar ao menu a qualquer momento
+    if text in ["voltar", "menu", "sair", "cancelar"] do
+      clear_atendimento_flow(from)
+      send_main_menu(phone_number_id, from)
+    else
+      flow = get_atendimento_flow(from)
 
-    case flow.step do
-      :waiting_cpf ->
-        handle_atendimento_cpf(phone_number_id, from, text)
+      case flow.step do
+        :waiting_cpf ->
+          handle_atendimento_cpf(phone_number_id, from, text)
 
-      :waiting_category ->
-        # User sent text instead of clicking a category button — remind them
-        send_atendimento_category_buttons(phone_number_id, from, flow)
+        :waiting_category ->
+          # User sent text instead of clicking a category button — remind them
+          send_atendimento_category_buttons(phone_number_id, from, flow)
 
-      :waiting_details ->
-        handle_atendimento_details(phone_number_id, from, text, flow)
+        :waiting_details ->
+          handle_atendimento_details(phone_number_id, from, text, flow)
+      end
     end
   end
 
   defp handle_atendimento_cpf(phone_number_id, from, text) do
     digits = String.replace(text, ~r/[^0-9]/, "")
 
-    if String.length(digits) in [11, 14] do
-      # Look up customer name
-      customer = Ersventaja.Customers.get_by_cpf_cnpj(digits)
-      customer_name = if customer, do: customer.name, else: "Cliente"
+    if String.length(digits) in [11, 14] and not blocked_cpf?(digits) do
+      # Verifica se tem apólices ativas
+      policies = Ersventaja.Policies.get_active_policies_by_cpf_cnpj(digits)
 
-      flow = %{
-        step: :waiting_category,
-        cpf: digits,
-        customer_name: customer_name
-      }
+      if policies == [] do
+        clear_atendimento_flow(from)
 
-      set_atendimento_flow(from, flow)
+        MetaApi.send_text(
+          phone_number_id,
+          from,
+          "❌ *Atendimento não disponível.*\n\n" <>
+            "O atendimento via WhatsApp está disponível apenas para clientes com *apólices vigentes*.\n\n" <>
+            "Não encontramos apólices ativas para o CPF/CNPJ informado. " <>
+            "Se acredita que isso é um erro, entre em contato pelo email: roberto@rsventaja.com"
+        )
+      else
+        # Look up customer name
+        customer = Ersventaja.Customers.get_by_cpf_cnpj(digits)
+        customer_name = if customer, do: customer.name, else: "Cliente"
 
-      send_atendimento_category_buttons(phone_number_id, from, flow)
+        flow = %{
+          step: :waiting_category,
+          cpf: digits,
+          customer_name: customer_name
+        }
+
+        set_atendimento_flow(from, flow)
+
+        send_atendimento_category_buttons(phone_number_id, from, flow)
+      end
     else
       MetaApi.send_text(
         phone_number_id,
@@ -738,7 +847,7 @@ defmodule Ersventaja.WhatsappBot do
         %{id: @btn_id_cat_sinistro, title: "🚨 Sinistro"},
         %{id: @btn_id_cat_troca_veiculo, title: "🚗 Troca de veículo"}
       ],
-      footer: "Escolha uma das opções acima"
+      footer: "Escolha uma opção ou digite *voltar*"
     )
   end
 
@@ -750,7 +859,7 @@ defmodule Ersventaja.WhatsappBot do
         @btn_id_cat_duvida ->
           {"duvida",
            "Digite sua *dúvida em uma única mensagem*. Se precisar, anexe arquivos ou fotos.\n\n" <>
-             "✏️ Escreva abaixo:"}
+             "✏️ Escreva abaixo ou digite *voltar* para cancelar."}
 
         @btn_id_cat_sinistro ->
           {"sinistro",
@@ -760,14 +869,14 @@ defmodule Ersventaja.WhatsappBot do
              "• Quando ocorreu?\n" <>
              "• Onde ocorreu?\n\n" <>
              "Se tiver *fotos ou documentos*, pode anexá-los.\n\n" <>
-             "✏️ Escreva abaixo:"}
+             "✏️ Escreva abaixo ou digite *voltar* para cancelar."}
 
         @btn_id_cat_troca_veiculo ->
           {"troca_veiculo",
            "Para a troca de veículo, precisamos de algumas informações:\n\n" <>
              "• *Qual a data prevista para retirada do veículo?*\n" <>
              "• Se já possuir a *nota fiscal*, pode anexá-la.\n\n" <>
-             "✏️ Escreva abaixo:"}
+             "✏️ Escreva abaixo ou digite *voltar* para cancelar."}
       end
 
     new_flow = Map.merge(flow, %{step: :waiting_details, category: category})

@@ -39,9 +39,27 @@ defmodule Ersventaja.Atendimento do
   Cria um novo agente de atendimento.
   """
   def create_agent(attrs) do
-    %AtendimentoAgent{}
-    |> AtendimentoAgent.changeset(attrs)
-    |> Repo.insert()
+    # Se já existe um agente (mesmo inativo) com este telefone, reativa e atualiza o nome
+    digits = normalize_phone_digits(attrs["phone"] || attrs[:phone] || "")
+
+    existing =
+      if digits != "" do
+        Repo.one(
+          from(a in AtendimentoAgent,
+            where: fragment("regexp_replace(?, '[^0-9]', '', 'g')", a.phone) == ^digits
+          )
+        )
+      end
+
+    if existing do
+      existing
+      |> AtendimentoAgent.changeset(Map.merge(attrs, %{active: true}))
+      |> Repo.update()
+    else
+      %AtendimentoAgent{}
+      |> AtendimentoAgent.changeset(attrs)
+      |> Repo.insert()
+    end
   end
 
   @doc """
@@ -255,6 +273,53 @@ defmodule Ersventaja.Atendimento do
   end
 
   def normalize_phone_digits(_), do: ""
+
+  # ---------------------------------------------------------------------------
+  # Blocked senders
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Verifica se um número está bloqueado.
+  """
+  def is_blocked?(phone) when is_binary(phone) do
+    Repo.exists?(from("blocked_senders", where: [phone: ^phone]))
+  end
+
+  def is_blocked?(_), do: false
+
+  @doc """
+  Bloqueia um número de telefone.
+  """
+  def block_sender(phone, blocked_by \\ nil) do
+    now = NaiveDateTime.utc_now()
+
+    Repo.insert_all(
+      "blocked_senders",
+      [
+        %{phone: phone, blocked_by: blocked_by, inserted_at: now, updated_at: now}
+      ],
+      on_conflict: :nothing
+    )
+  end
+
+  @doc """
+  Desbloqueia um número de telefone.
+  """
+  def unblock_sender(phone) do
+    Repo.delete_all(from("blocked_senders", where: [phone: ^phone]))
+  end
+
+  @doc """
+  Lista todos os números bloqueados.
+  """
+  def list_blocked_senders do
+    Repo.all(
+      from(b in "blocked_senders",
+        select: [:phone, :blocked_by, :inserted_at],
+        order_by: [desc: :inserted_at]
+      )
+    )
+  end
 
   # ---------------------------------------------------------------------------
   # Recovery after restart

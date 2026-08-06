@@ -923,6 +923,18 @@ defmodule ErsventajaWeb.ControlPanelLive do
   end
 
   @impl true
+  def handle_event("block_sender", %{"phone" => phone}, socket) do
+    Atendimento.block_sender(phone, "control_panel")
+    {:noreply, socket |> put_flash(:success, "Número #{phone} bloqueado.")}
+  end
+
+  @impl true
+  def handle_event("unblock_sender", %{"phone" => phone}, socket) do
+    Atendimento.unblock_sender(phone)
+    {:noreply, socket |> put_flash(:success, "Número #{phone} desbloqueado.")}
+  end
+
+  @impl true
   def handle_event("close_atendimento", _params, socket) do
     {:noreply,
      socket
@@ -1270,6 +1282,21 @@ defmodule ErsventajaWeb.ControlPanelLive do
 
   defp format_date(%Date{} = date) do
     Calendar.strftime(date, "%d/%m/%Y")
+  end
+
+  defp format_brasilia_time(nil), do: "—"
+
+  defp format_brasilia_time(dt) do
+    # Converte de UTC para UTC-3 (Brasília)
+    local = NaiveDateTime.add(dt, -3 * 3600, :second)
+    Calendar.strftime(local, "%d/%m/%Y %H:%M")
+  end
+
+  defp format_brasilia_time_short(nil), do: "—"
+
+  defp format_brasilia_time_short(dt) do
+    local = NaiveDateTime.add(dt, -3 * 3600, :second)
+    NaiveDateTime.to_string(local) |> String.slice(11..15)
   end
 
   defp error_to_string(:too_large), do: "Arquivo muito grande"
@@ -3425,6 +3452,17 @@ defmodule ErsventajaWeb.ControlPanelLive do
                     <strong style="color: #64748b; font-size: 12px;">CPF/CNPJ</strong>
                     <br/><span style="color: #374151;"><%= @selected_atendimento.cpf_cnpj %></span>
                   </div>
+                  <div style="min-width: 150px;">
+                    <strong style="color: #64748b; font-size: 12px;">WhatsApp</strong>
+                    <br/>
+                    <span style="color: #374151; font-size: 13px;"><%= @selected_atendimento.whatsapp_phone %></span>
+                    <button phx-click="block_sender" phx-value-phone={@selected_atendimento.whatsapp_phone}
+                            style="margin-left: 6px; background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5;
+                                   border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;"
+                            title="Bloquear este número">
+                      🚫 Bloquear
+                    </button>
+                  </div>
                   <div style="min-width: 120px;">
                     <strong style="color: #64748b; font-size: 12px;">Categoria</strong>
                     <br/>
@@ -3490,7 +3528,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
                           <% end %>
                         </div>
                         <div style="font-size: 10px; margin-top: 4px; opacity: 0.5;">
-                          <%= msg.inserted_at |> NaiveDateTime.to_string() |> String.slice(11..15) %>
+                          <%= format_brasilia_time_short(msg.inserted_at) %>
                         </div>
                       </div>
                     </div>
@@ -3522,7 +3560,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
                           class="hover-row" style="cursor: pointer;"
                         >
                           <td style="padding: 0.75em; font-size: 14px; color: #374151;">
-                            <%= if att.started_at, do: Calendar.strftime(att.started_at, "%d/%m/%Y %H:%M") %>
+                            <%= format_brasilia_time(att.started_at) %>
                           </td>
                           <td style="padding: 0.75em; font-size: 14px; color: #374151;">
                             <%= att.customer_name || "—" %>
