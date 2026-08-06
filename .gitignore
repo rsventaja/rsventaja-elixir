@@ -33,6 +33,8 @@ loan-*.tar
 
 # Environment variables
 .env
+.env.prod
+.env.prod.bak*
 .deploy.env
 
 # Python probe (scripts/segfy_chain_probe.py)

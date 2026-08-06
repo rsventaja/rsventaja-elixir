@@ -37,6 +37,7 @@ defmodule Ersventaja.Customers.Models.Customer do
     )
     |> normalize_cpf_cnpj()
     |> normalize_name()
+    |> normalize_phone()
   end
 
   defp normalize_cpf_cnpj(%{changes: %{cpf_cnpj: cpf_cnpj}} = changeset) when not is_nil(cpf_cnpj) do
@@ -51,4 +52,47 @@ defmodule Ersventaja.Customers.Models.Customer do
   end
 
   defp normalize_name(changeset), do: changeset
+
+  defp normalize_phone(%{changes: %{phone: phone}} = changeset) when not is_nil(phone) and phone != "" do
+    formatted = format_phone(phone)
+    put_change(changeset, :phone, formatted)
+  end
+
+  defp normalize_phone(changeset), do: changeset
+
+  def format_phone(phone) when is_binary(phone) do
+    digits = String.replace(phone, ~r/[^0-9]/, "")
+
+    # Remove country code 55 prefix
+    digits = if String.length(digits) >= 12 and String.starts_with?(digits, "55"),
+      do: String.slice(digits, 2..-1//1),
+      else: digits
+
+    # Missing DDD → default to 11 (São Paulo)
+    digits = case String.length(digits) do
+      9 -> "11" <> digits
+      8 -> "11" <> digits
+      _ -> digits
+    end
+
+    case String.length(digits) do
+      11 ->
+        # Cell: (DD) 9XXXX-XXXX
+        "(" <> String.slice(digits, 0, 2) <> ") " <>
+          String.slice(digits, 2, 1) <> String.slice(digits, 3, 4) <>
+          "-" <> String.slice(digits, 7, 4)
+
+      10 ->
+        # Landline: (DD) XXXX-XXXX
+        "(" <> String.slice(digits, 0, 2) <> ") " <>
+          String.slice(digits, 2, 4) <> "-" <> String.slice(digits, 6, 4)
+
+      _ ->
+        # Can't normalize — keep original
+        phone
+    end
+  end
+
+  def format_phone(nil), do: nil
+  def format_phone(phone), do: phone
 end
