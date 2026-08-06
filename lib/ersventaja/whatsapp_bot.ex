@@ -1037,47 +1037,71 @@ defmodule Ersventaja.WhatsappBot do
 
   # Tenta encontrar o PID de um GenServer de atendimento.
   # Se não encontrar (ex: após reboot), recria o GenServer a partir dos dados no banco.
+  # Só recria se o atendimento ainda estiver "active" no banco.
   defp get_or_recover_atendimento_pid(atendimento_id, atendimento, phone_number_id) do
     case find_atendimento_pid(atendimento_id) do
       nil ->
-        Logger.info("[WhatsApp] Recovering orphan atendimento ##{atendimento_id} after restart")
+        # Recarrega do banco pra garantir que ainda está ativo
+        fresh = Ersventaja.Atendimento.get_atendimento(atendimento_id)
 
-        agent = atendimento.agent
+        cond do
+          is_nil(fresh) or fresh.status != "active" ->
+            Logger.info(
+              "[WhatsApp] Atendimento ##{atendimento_id} is no longer active (status=#{fresh && fresh.status}), skipping recovery"
+            )
 
-        if is_nil(agent) do
-          Logger.error("[WhatsApp] Cannot recover atendimento ##{atendimento_id}: no agent")
-          :error
-        else
-          server_data = %{
-            atendimento_id: atendimento.id,
-            client_phone: atendimento.whatsapp_phone,
-            agent_phone: agent.phone,
-            phone_number_id: phone_number_id,
-            category: atendimento.category,
-            customer_name: atendimento.customer_name || "Cliente",
-            agent_name: agent.name,
-            cpf_cnpj: atendimento.cpf_cnpj,
-            recovery: true
-          }
+            :error
 
-          case Ersventaja.Atendimento.AtendimentoSupervisor.start_child(server_data) do
-            {:ok, pid} ->
-              Logger.info(
-                "[WhatsApp] Atendimento ##{atendimento_id} recovered, PID: #{inspect(pid)}"
-              )
+          is_nil(fresh.agent_id) ->
+            Logger.error("[WhatsApp] Cannot recover atendimento ##{atendimento_id}: no agent")
+            :error
 
-              {:ok, pid}
+          true ->
+            # Recarrega o agente
+            agent = Ersventaja.Atendimento.get_agent(fresh.agent_id)
 
-            {:error, {:already_started, pid}} ->
-              {:ok, pid}
-
-            {:error, reason} ->
+            if is_nil(agent) do
               Logger.error(
-                "[WhatsApp] Failed to recover atendimento ##{atendimento_id}: #{inspect(reason)}"
+                "[WhatsApp] Cannot recover atendimento ##{atendimento_id}: agent not found"
               )
 
               :error
-          end
+            else
+              Logger.info(
+                "[WhatsApp] Recovering orphan atendimento ##{atendimento_id} after restart"
+              )
+
+              server_data = %{
+                atendimento_id: fresh.id,
+                client_phone: fresh.whatsapp_phone,
+                agent_phone: agent.phone,
+                phone_number_id: phone_number_id,
+                category: fresh.category,
+                customer_name: fresh.customer_name || "Cliente",
+                agent_name: agent.name,
+                cpf_cnpj: fresh.cpf_cnpj,
+                recovery: true
+              }
+
+              case Ersventaja.Atendimento.AtendimentoSupervisor.start_child(server_data) do
+                {:ok, pid} ->
+                  Logger.info(
+                    "[WhatsApp] Atendimento ##{atendimento_id} recovered, PID: #{inspect(pid)}"
+                  )
+
+                  {:ok, pid}
+
+                {:error, {:already_started, pid}} ->
+                  {:ok, pid}
+
+                {:error, reason} ->
+                  Logger.error(
+                    "[WhatsApp] Failed to recover atendimento ##{atendimento_id}: #{inspect(reason)}"
+                  )
+
+                  :error
+              end
+            end
         end
 
       pid ->

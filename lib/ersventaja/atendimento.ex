@@ -290,11 +290,17 @@ defmodule Ersventaja.Atendimento do
 
       if inactivity_seconds >= 600 do
         # Mais de 10 min de inatividade → expira
-        end_atendimento(att, "timeout")
+        case end_atendimento(att, "timeout") do
+          {:ok, _} ->
+            Logger.info(
+              "[Atendimento] ##{att.id} expired on recovery (inactive for #{inactivity_seconds}s)"
+            )
 
-        Logger.info(
-          "[Atendimento] ##{att.id} expired on recovery (inactive for #{inactivity_seconds}s)"
-        )
+          {:error, reason} ->
+            Logger.error(
+              "[Atendimento] ##{att.id} failed to expire on recovery: #{inspect(reason)}"
+            )
+        end
 
         nil
       else

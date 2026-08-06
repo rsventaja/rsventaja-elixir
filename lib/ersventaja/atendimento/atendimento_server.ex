@@ -314,10 +314,13 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
 
   defp end_atendimento(state, ended_by, message) do
     if state.status == :active do
-      # Atualiza no banco
+      # Marca como :ending pra evitar que timeout/disparo paralelo execute de novo
+      state = %{state | status: :ending}
+
+      # Recarrega do banco pra confirmar que ainda está ativo
       atendimento = Atendimento.get_atendimento(state.atendimento_id)
 
-      if atendimento do
+      if atendimento && atendimento.status == "active" do
         Atendimento.end_atendimento(atendimento, ended_by)
 
         # Salva mensagem de sistema
@@ -329,21 +332,25 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
           content: message,
           whatsapp_phone: state.phone_number_id
         })
-      end
 
-      # Notifica ambas as partes
-      MetaApi.send_text(state.phone_number_id, state.client_phone, message)
+        # Notifica ambas as partes
+        MetaApi.send_text(state.phone_number_id, state.client_phone, message)
 
-      if ended_by != "agent" do
-        MetaApi.send_text(
-          state.phone_number_id,
-          state.agent_phone,
-          "👋 *Atendimento ##{state.atendimento_id} encerrado.* " <>
-            "Motivo: #{humanize_ended_by(ended_by)}."
+        if ended_by != "agent" do
+          MetaApi.send_text(
+            state.phone_number_id,
+            state.agent_phone,
+            "👋 *Atendimento ##{state.atendimento_id} encerrado.* " <>
+              "Motivo: #{humanize_ended_by(ended_by)}."
+          )
+        end
+
+        Logger.info("[Atendimento] ##{state.atendimento_id} encerrado por: #{ended_by}")
+      else
+        Logger.info(
+          "[Atendimento] ##{state.atendimento_id} já estava encerrado no banco, pulando notificação"
         )
       end
-
-      Logger.info("[Atendimento] ##{state.atendimento_id} encerrado por: #{ended_by}")
     end
 
     # Cancela timer pendente
