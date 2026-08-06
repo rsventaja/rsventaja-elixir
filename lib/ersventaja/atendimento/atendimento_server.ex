@@ -92,27 +92,30 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
     client_phone = data.client_phone
     agent_phone = data.agent_phone
     phone_number_id = data.phone_number_id
+    recovery? = Map.get(data, :recovery, false)
 
-    # Envia mensagem de boas-vindas ao cliente
-    welcome_msg =
-      "✅ *Atendimento iniciado!*\n\n" <>
-        "Um de nossos atendentes irá responder em breve. " <>
-        "Você pode enviar mensagens, fotos, documentos e áudios.\n\n" <>
-        "⏰ *Importante:* O atendimento será encerrado automaticamente " <>
-        "após 10 minutos de inatividade.\n\n" <>
-        "Digite *encerrar* a qualquer momento para finalizar o atendimento."
+    unless recovery? do
+      # Envia mensagem de boas-vindas ao cliente (apenas em criação nova)
+      welcome_msg =
+        "✅ *Atendimento iniciado!*\n\n" <>
+          "Um de nossos atendentes irá responder em breve. " <>
+          "Você pode enviar mensagens, fotos, documentos e áudios.\n\n" <>
+          "⏰ *Importante:* O atendimento será encerrado automaticamente " <>
+          "após 10 minutos de inatividade.\n\n" <>
+          "Digite *encerrar* a qualquer momento para finalizar o atendimento."
 
-    MetaApi.send_text(phone_number_id, client_phone, welcome_msg)
+      MetaApi.send_text(phone_number_id, client_phone, welcome_msg)
 
-    # Salva mensagem de sistema no banco
-    Atendimento.add_message(%{
-      atendimento_id: atendimento_id,
-      direction: "outgoing",
-      sender_type: "system",
-      content_type: "text",
-      content: welcome_msg,
-      whatsapp_phone: phone_number_id
-    })
+      # Salva mensagem de sistema no banco
+      Atendimento.add_message(%{
+        atendimento_id: atendimento_id,
+        direction: "outgoing",
+        sender_type: "system",
+        content_type: "text",
+        content: welcome_msg,
+        whatsapp_phone: phone_number_id
+      })
+    end
 
     # Agenda timer de inatividade
     timer_ref = Process.send_after(self(), :timeout, @timeout_ms)
@@ -126,8 +129,10 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
       timer_ref: timer_ref
     }
 
+    status_label = if recovery?, do: "recuperado", else: "iniciado"
+
     Logger.info(
-      "[Atendimento] ##{atendimento_id} iniciado | Cliente: #{client_phone} | Agente: #{agent_phone}"
+      "[Atendimento] ##{atendimento_id} #{status_label} | Cliente: #{client_phone} | Agente: #{agent_phone}"
     )
 
     {:ok, state}

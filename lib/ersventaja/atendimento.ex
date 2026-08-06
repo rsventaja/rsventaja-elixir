@@ -293,7 +293,7 @@ defmodule Ersventaja.Atendimento do
 
         nil
       else
-        # Ainda ativo → dados para recriar o GenServer
+        # Ainda ativo → dados para recriar o GenServer (modo recovery)
         %{
           atendimento_id: att.id,
           client_phone: att.whatsapp_phone,
@@ -301,7 +301,8 @@ defmodule Ersventaja.Atendimento do
           phone_number_id: phone_number_id,
           category: att.category,
           customer_name: att.customer_name || "Cliente",
-          cpf_cnpj: att.cpf_cnpj
+          cpf_cnpj: att.cpf_cnpj,
+          recovery: true
         }
       end
     end)

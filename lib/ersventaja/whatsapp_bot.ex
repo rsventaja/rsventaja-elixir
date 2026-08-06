@@ -899,7 +899,7 @@ defmodule Ersventaja.WhatsappBot do
   defp route_agent_text_to_atendimento(phone_number_id, from, text) do
     case Ersventaja.Atendimento.get_active_atendimento_for_agent(from) do
       %{id: att_id} = att ->
-        case get_or_recover_atendimento_pid(att_id, att) do
+        case get_or_recover_atendimento_pid(att_id, att, phone_number_id) do
           {:ok, pid} ->
             if String.downcase(String.trim(text)) in ["encerrar", "finalizar", "terminar"] do
               Ersventaja.Atendimento.AtendimentoServer.end_by_agent(pid)
@@ -929,7 +929,7 @@ defmodule Ersventaja.WhatsappBot do
   defp route_client_text_to_atendimento(phone_number_id, from, text) do
     case Ersventaja.Atendimento.get_active_atendimento_by_phone(from) do
       %{id: att_id} = att ->
-        case get_or_recover_atendimento_pid(att_id, att) do
+        case get_or_recover_atendimento_pid(att_id, att, phone_number_id) do
           {:ok, pid} ->
             if String.downcase(String.trim(text)) in ["encerrar", "finalizar", "terminar"] do
               Ersventaja.Atendimento.AtendimentoServer.end_by_client(pid)
@@ -959,7 +959,7 @@ defmodule Ersventaja.WhatsappBot do
   defp route_agent_media_to_atendimento(phone_number_id, from, msg) do
     case Ersventaja.Atendimento.get_active_atendimento_for_agent(from) do
       %{id: att_id} = att ->
-        case get_or_recover_atendimento_pid(att_id, att) do
+        case get_or_recover_atendimento_pid(att_id, att, phone_number_id) do
           {:ok, pid} ->
             media_type = msg["type"]
             media_id = get_in(msg, [media_type, "id"])
@@ -990,7 +990,7 @@ defmodule Ersventaja.WhatsappBot do
   defp route_client_media_to_atendimento(phone_number_id, from, msg) do
     case Ersventaja.Atendimento.get_active_atendimento_by_phone(from) do
       %{id: att_id} = att ->
-        case get_or_recover_atendimento_pid(att_id, att) do
+        case get_or_recover_atendimento_pid(att_id, att, phone_number_id) do
           {:ok, pid} ->
             media_type = msg["type"]
             media_id = get_in(msg, [media_type, "id"])
@@ -1036,53 +1036,38 @@ defmodule Ersventaja.WhatsappBot do
 
   # Tenta encontrar o PID de um GenServer de atendimento.
   # Se não encontrar (ex: após reboot), recria o GenServer a partir dos dados no banco.
-  defp get_or_recover_atendimento_pid(atendimento_id, atendimento) do
+  defp get_or_recover_atendimento_pid(atendimento_id, atendimento, phone_number_id) do
     case find_atendimento_pid(atendimento_id) do
       nil ->
         Logger.info("[WhatsApp] Recovering orphan atendimento ##{atendimento_id} after restart")
 
-        # O atendimento já veio com preload de :agent da query
         agent = atendimento.agent
 
         if is_nil(agent) do
           Logger.error("[WhatsApp] Cannot recover atendimento ##{atendimento_id}: no agent")
           :error
         else
-          # Recria o GenServer com os dados do banco
           server_data = %{
             atendimento_id: atendimento.id,
             client_phone: atendimento.whatsapp_phone,
             agent_phone: agent.phone,
-            phone_number_id: phone_number_id_from_agent(agent),
+            phone_number_id: phone_number_id,
             category: atendimento.category,
             customer_name: atendimento.customer_name || "Cliente",
-            cpf_cnpj: atendimento.cpf_cnpj
+            cpf_cnpj: atendimento.cpf_cnpj,
+            recovery: true
           }
 
           case Ersventaja.Atendimento.AtendimentoSupervisor.start_child(server_data) do
             {:ok, pid} ->
-              Logger.info(
-                "[WhatsApp] Atendimento ##{atendimento_id} recovered, new PID: #{inspect(pid)}"
-              )
-
-              # Notifica o cliente que o atendimento foi restaurado
-              MetaApi.send_text(
-                server_data.phone_number_id,
-                atendimento.whatsapp_phone,
-                "🔄 *Atendimento restaurado.* Sua conversa anterior foi recuperada. " <>
-                  "O atendente já pode respondê-lo novamente."
-              )
-
+              Logger.info("[WhatsApp] Atendimento ##{atendimento_id} recovered, PID: #{inspect(pid)}")
               {:ok, pid}
 
             {:error, {:already_started, pid}} ->
               {:ok, pid}
 
             {:error, reason} ->
-              Logger.error(
-                "[WhatsApp] Failed to recover atendimento ##{atendimento_id}: #{inspect(reason)}"
-              )
-
+              Logger.error("[WhatsApp] Failed to recover atendimento ##{atendimento_id}: #{inspect(reason)}")
               :error
           end
         end
@@ -1090,9 +1075,5 @@ defmodule Ersventaja.WhatsappBot do
       pid ->
         {:ok, pid}
     end
-  end
-
-  defp phone_number_id_from_agent(_agent) do
-    Application.get_env(:ersventaja, :whatsapp)[:phone_number_id] || ""
   end
 end
