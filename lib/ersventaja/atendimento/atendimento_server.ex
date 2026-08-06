@@ -120,11 +120,16 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
     # Agenda timer de inatividade
     timer_ref = Process.send_after(self(), :timeout, @timeout_ms)
 
+    client_name = Map.get(data, :customer_name, "Cliente")
+    agent_name = Map.get(data, :agent_name, "Atendente")
+
     state = %{
       atendimento_id: atendimento_id,
       client_phone: client_phone,
       agent_phone: agent_phone,
       phone_number_id: phone_number_id,
+      client_name: client_name,
+      agent_name: agent_name,
       status: :active,
       timer_ref: timer_ref
     }
@@ -155,8 +160,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
         whatsapp_phone: state.client_phone
       })
 
-      # Encaminha para o atendente
-      MetaApi.send_text(state.phone_number_id, state.agent_phone, text)
+      # Encaminha para o atendente com nome do cliente
+      prefixed = "*#{state.client_name}:*\n#{text}"
+      MetaApi.send_text(state.phone_number_id, state.agent_phone, prefixed)
 
       Logger.info(
         "[Atendimento] ##{state.atendimento_id} Cliente → Atendente: #{String.slice(text, 0, 100)}"
@@ -179,8 +185,9 @@ defmodule Ersventaja.Atendimento.AtendimentoServer do
         whatsapp_phone: state.agent_phone
       })
 
-      # Encaminha para o cliente
-      MetaApi.send_text(state.phone_number_id, state.client_phone, text)
+      # Encaminha para o cliente com nome do atendente
+      prefixed = "*#{state.agent_name}:*\n#{text}"
+      MetaApi.send_text(state.phone_number_id, state.client_phone, prefixed)
 
       Logger.info(
         "[Atendimento] ##{state.atendimento_id} Atendente → Cliente: #{String.slice(text, 0, 100)}"

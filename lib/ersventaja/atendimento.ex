@@ -301,6 +301,7 @@ defmodule Ersventaja.Atendimento do
           phone_number_id: phone_number_id,
           category: att.category,
           customer_name: att.customer_name || "Cliente",
+          agent_name: (att.agent && att.agent.name) || "Atendente",
           cpf_cnpj: att.cpf_cnpj,
           recovery: true
         }

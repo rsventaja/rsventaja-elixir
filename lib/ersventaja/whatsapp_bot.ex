@@ -816,6 +816,7 @@ defmodule Ersventaja.WhatsappBot do
             phone_number_id: phone_number_id,
             category: flow.category,
             customer_name: flow.customer_name,
+            agent_name: agent.name,
             cpf_cnpj: flow.cpf
           }
 
@@ -833,10 +834,7 @@ defmodule Ersventaja.WhatsappBot do
                 "[WhatsApp] Atendimento ##{atendimento.id} started | PID: #{inspect(pid)}"
               )
 
-              # Forward the initial client message to the GenServer
-              Ersventaja.Atendimento.AtendimentoServer.client_message(pid, details_text)
-
-              # Send summary to agent
+              # 1️⃣ Primeiro: envia resumo para o atendente
               category_label =
                 case flow.category do
                   "duvida" -> "Dúvida"
@@ -855,6 +853,9 @@ defmodule Ersventaja.WhatsappBot do
                   "*Mensagem do cliente:*\n#{details_text}\n\n" <>
                   "Responda esta mensagem para iniciar o atendimento."
               )
+
+              # 2️⃣ Depois: encaminha a mensagem do cliente para o GenServer
+              Ersventaja.Atendimento.AtendimentoServer.client_message(pid, details_text)
 
             {:error, {:already_started, pid}} ->
               Logger.warning("[WhatsApp] Atendimento ##{atendimento.id} already started")
@@ -1054,20 +1055,27 @@ defmodule Ersventaja.WhatsappBot do
             phone_number_id: phone_number_id,
             category: atendimento.category,
             customer_name: atendimento.customer_name || "Cliente",
+            agent_name: agent.name,
             cpf_cnpj: atendimento.cpf_cnpj,
             recovery: true
           }
 
           case Ersventaja.Atendimento.AtendimentoSupervisor.start_child(server_data) do
             {:ok, pid} ->
-              Logger.info("[WhatsApp] Atendimento ##{atendimento_id} recovered, PID: #{inspect(pid)}")
+              Logger.info(
+                "[WhatsApp] Atendimento ##{atendimento_id} recovered, PID: #{inspect(pid)}"
+              )
+
               {:ok, pid}
 
             {:error, {:already_started, pid}} ->
               {:ok, pid}
 
             {:error, reason} ->
-              Logger.error("[WhatsApp] Failed to recover atendimento ##{atendimento_id}: #{inspect(reason)}")
+              Logger.error(
+                "[WhatsApp] Failed to recover atendimento ##{atendimento_id}: #{inspect(reason)}"
+              )
+
               :error
           end
         end

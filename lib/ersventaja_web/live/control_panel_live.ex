@@ -3515,6 +3515,7 @@ defmodule ErsventajaWeb.ControlPanelLive do
                       <tr>
                         <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Data</th>
                         <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Cliente</th>
+                        <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">WhatsApp</th>
                         <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Categoria</th>
                         <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Status</th>
                         <th style="padding: 0.75em; text-align: left; font-size: 13px; font-weight: 600; color: #64748b; border-bottom: 2px solid #e5e7eb;">Atendente</th>
@@ -3533,6 +3534,17 @@ defmodule ErsventajaWeb.ControlPanelLive do
                           <td style="padding: 0.75em; font-size: 14px; color: #374151;">
                             <%= att.customer_name || "—" %>
                             <div style="font-size: 11px; color: #94a3b8;"><%= att.cpf_cnpj %></div>
+                          </td>
+                          <td style="padding: 0.75em; font-size: 13px; color: #374151;">
+                            <%= if att.whatsapp_phone do %>
+                              <a href={"https://wa.me/#{String.replace(att.whatsapp_phone, ~r/[^0-9]/, "")}"}
+                                 target="_blank" style="color: #25D366; text-decoration: none;"
+                                 phx-click="noop">
+                                <i class="fab fa-whatsapp" style="margin-right: 4px;"></i><%= att.whatsapp_phone %>
+                              </a>
+                            <% else %>
+                              —
+                            <% end %>
                           </td>
                           <td style="padding: 0.75em;">
                             <%= case att.category do %>
